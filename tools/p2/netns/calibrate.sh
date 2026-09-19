@@ -13,14 +13,15 @@ MAX_RATE_RATIO="${BABR_CAL_MAX_RATE_RATIO:-1.15}"
 
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_DIR"/calibration-* "$ARTIFACT_DIR"/iperf-* "$ARTIFACT_DIR"/ping.txt
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "$ARTIFACT_DIR/calibration-started.txt"
 
 cleanup() {
-  "$HERE/cleanup.sh" >/dev/null 2>&1 || true
+  bash "$HERE/cleanup.sh" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-"$HERE/setup.sh"
-"$HERE/shape.sh"
+bash "$HERE/setup.sh"
+bash "$HERE/shape.sh"
 
 {
   echo "kernel=$(uname -srvm)"
