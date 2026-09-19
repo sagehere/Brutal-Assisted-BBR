@@ -57,6 +57,7 @@ jobs:
           git -C third_party/quiche-0.29.3 diff --check
           git -C third_party/quiche-0.29.3 diff -- \
             quiche/src/recovery/gcongestion/bbr2.rs \
+            quiche/src/recovery/gcongestion/babr_telemetry.rs \
             quiche/src/recovery/gcongestion/pacer.rs \
             quiche/src/recovery/gcongestion/recovery.rs \
             quiche/src/recovery/mod.rs \
