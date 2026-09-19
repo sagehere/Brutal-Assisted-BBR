@@ -8,7 +8,13 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
 
-from babr_model import BabrReferenceController, Mode, Snapshot, load_rules
+from babr_model import (
+    BabrReferenceController,
+    Mode,
+    Snapshot,
+    load_rules,
+    run_accounting_trace,
+)
 
 CONTRACT_PATH = REPO_ROOT / "阶段任务书" / "P1-冻结参数与用例.json"
 
@@ -70,6 +76,35 @@ class P2ObserveTests(unittest.TestCase):
             self.assertEqual(d.shadow_reason, "BBR_PHASE_PROTECTED")
             self.assertEqual(d.candidate_pacing, 20_000_000)
             self.assertEqual(d.final_pacing, 20_000_000)
+
+    def test_l06_loss_retransmit_late_ack_counts_unique_payload_once(self):
+        trace_path = HERE / "traces" / "l06_retransmission_late_ack.json"
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+
+        snapshots = run_accounting_trace(trace)
+        self.assertEqual(len(snapshots), len(trace["events"]))
+
+        # First send is charged immediately but has delivered no payload.
+        self.assertEqual(snapshots[0].actual_socket_sent_bytes, 1250)
+        self.assertEqual(snapshots[0].unique_payload_delivered_bytes, 0)
+
+        # Loss does not refund send cost or create delivery.
+        self.assertEqual(snapshots[1].actual_socket_sent_bytes, 1250)
+        self.assertEqual(snapshots[1].unique_payload_delivered_bytes, 0)
+
+        # Retransmission is another successful socket send, so all cost counts.
+        self.assertEqual(snapshots[2].actual_socket_sent_bytes, 2500)
+        self.assertEqual(snapshots[2].unique_payload_delivered_bytes, 0)
+
+        # Retransmission ACK delivers the STREAM range once.
+        self.assertEqual(snapshots[3].unique_payload_delivered_bytes, 1200)
+
+        # Late ACK for the original packet is spurious and must not add payload.
+        final = snapshots[4]
+        self.assertEqual(final.unique_payload_delivered_bytes, 1200)
+
+        for field, expected in trace["expect"].items():
+            self.assertEqual(getattr(final, field), expected, field)
 
     def test_l07_invalid_sample_cannot_increase_candidate(self):
         obs = BabrReferenceController(
