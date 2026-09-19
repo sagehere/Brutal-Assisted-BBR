@@ -115,6 +115,35 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +}
 +
  /// A QUIC connection.
+@@ -530,4 +530,28 @@ impl BabrUniquePayloadTracker {
+     }
+ }
+ 
++#[cfg(test)]
++mod babr_p2_unique_payload_tests {
++    use super::BabrUniquePayloadTracker;
++
++    #[test]
++    fn l06_retransmission_and_late_duplicate_count_payload_once() {
++        let mut tracker = BabrUniquePayloadTracker::default();
++
++        // First successful delivery of bytes [0, 4).
++        assert_eq!(tracker.observe_stream_range(4, 0, 4), 4);
++
++        // Retransmission or late original ACK of the same bytes.
++        assert_eq!(tracker.observe_stream_range(4, 0, 4), 0);
++
++        // Partial overlap only contributes previously unseen bytes [4, 6).
++        assert_eq!(tracker.observe_stream_range(4, 2, 4), 2);
++
++        // The same offsets on another stream are distinct payload.
++        assert_eq!(tracker.observe_stream_range(8, 0, 4), 4);
++
++        assert_eq!(tracker.total_bytes(), 10);
++    }
++}
++
+ /// A QUIC connection.
 @@ -620,4 +668,7 @@ pub struct Connection<F = DefaultBufFactory>
      /// Total number of bytes sent lost over the connection.
      lost_bytes: u64,
@@ -153,32 +182,3 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +        }
 +
          // Now that we processed all the frames, if there is a path that has no
-@@ -530,4 +530,28 @@ impl BabrUniquePayloadTracker {
-     }
- }
- 
-+#[cfg(test)]
-+mod babr_p2_unique_payload_tests {
-+    use super::BabrUniquePayloadTracker;
-+
-+    #[test]
-+    fn l06_retransmission_and_late_duplicate_count_payload_once() {
-+        let mut tracker = BabrUniquePayloadTracker::default();
-+
-+        // First successful delivery of bytes [0, 4).
-+        assert_eq!(tracker.observe_stream_range(4, 0, 4), 4);
-+
-+        // Retransmission or late original ACK of the same bytes.
-+        assert_eq!(tracker.observe_stream_range(4, 0, 4), 0);
-+
-+        // Partial overlap only contributes previously unseen bytes [4, 6).
-+        assert_eq!(tracker.observe_stream_range(4, 2, 4), 2);
-+
-+        // The same offsets on another stream are distinct payload.
-+        assert_eq!(tracker.observe_stream_range(8, 0, 4), 4);
-+
-+        assert_eq!(tracker.total_bytes(), 10);
-+    }
-+}
-+
- /// A QUIC connection.
