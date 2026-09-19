@@ -62,7 +62,7 @@ diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
 diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
 --- a/quiche/src/stream/send_buf.rs
 +++ b/quiche/src/stream/send_buf.rs
-@@ -550,4 +550,11 @@ impl<F: BufFactory> SendBuf<F> {
+@@ -550,4 +550,12 @@ impl<F: BufFactory> SendBuf<F> {
          }
      }
  
@@ -78,7 +78,7 @@ diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
 diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 --- a/quiche/src/lib.rs
 +++ b/quiche/src/lib.rs
-@@ -1435,4 +1509,7 @@ pub struct Connection<F = DefaultBufFactory>
+@@ -1435,4 +1509,9 @@ pub struct Connection<F = DefaultBufFactory>
      /// Total number of bytes sent lost over the connection.
      lost_bytes: u64,
  
@@ -86,16 +86,16 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +    babr_unique_payload_delivered_bytes: u64,
 +    /// True only while Observe accounting is enabled for this connection.
 +    babr_observe_accounting_enabled: bool,
-++
++
      /// Streams map, indexed by stream ID.
-@@ -2099,4 +2176,5 @@ impl<F: BufFactory> Connection<F> {
+@@ -2099,4 +2176,6 @@ impl<F: BufFactory> Connection<F> {
              acked_bytes: 0,
              lost_bytes: 0,
 +            babr_unique_payload_delivered_bytes: 0,
 +            babr_observe_accounting_enabled: false,
  
              rx_data: 0,
-@@ -3592,7 +3670,11 @@ impl<F: BufFactory> Connection<F> {
+@@ -3592,8 +3670,10 @@ impl<F: BufFactory> Connection<F> {
                      frame::Frame::StreamHeader {
                          stream_id,
                          offset,
@@ -104,7 +104,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
                      } => {
 +                        let babr_account_unique =
 +                            self.babr_observe_accounting_enabled;
-
+ 
                          // Emit qlog before checking if the stream still exists.
 @@ -3620,5 +3698,13 @@ impl<F: BufFactory> Connection<F> {
                              None => continue,
@@ -130,7 +130,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +                            .saturating_add(unique_delta);
                      },
  
-@@ -3723,5 +3805,13 @@ impl<F: BufFactory> Connection<F> {
+@@ -3723,5 +3805,14 @@ impl<F: BufFactory> Connection<F> {
                  }
              }
          }
