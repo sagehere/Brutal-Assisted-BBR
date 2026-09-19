@@ -394,8 +394,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
     fh.write("\n")
 print(json.dumps({k: v for k, v in summary.items() if k != "rows"}, sort_keys=True))
 
-if not summary["pair_gate_pass"]:
-    raise SystemExit("paired Observe resource gate failed")
+if not summary["pair_gate_pass"]:\n    print("paired Observe resource gate failed; continuing to collect Log60 evidence", file=sys.stderr)
 PY
 
 # Real >=60 s Observe trace for the serialized-log budget. 768 MiB at the
@@ -454,8 +453,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
     json.dump(summary, fh, indent=2, sort_keys=True)
     fh.write("\n")
 print(json.dumps(summary, sort_keys=True))
-if not summary["log_pass"]:
-    raise SystemExit("real Observe log budget exceeded")
+if not summary["log_pass"]:\n    print("real Observe log budget exceeded; continuing to aggregate final gate evidence", file=sys.stderr)
 PY
 
 python3 - "$OUT/overhead-summary.json" "$OUT/log60-summary.json" "$OUT/gate-summary.json" <<'PY'
