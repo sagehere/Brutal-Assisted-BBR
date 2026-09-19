@@ -51,7 +51,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/reco
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -511,4 +511,11 @@ impl GRecovery {
+@@ -511,5 +511,13 @@ impl GRecovery {
              return;
          }
  
