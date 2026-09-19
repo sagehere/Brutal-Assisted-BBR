@@ -20,7 +20,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/reco
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,639 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -42,13 +42,19 @@ new file mode 100644
 +const SERIALIZATION_WINDOW: Duration = Duration::from_secs(60);
 +const UNAVAILABLE_U64: u64 = u64::MAX;
 +
-+const FLAG_END_OF_ROUND: u8 = 1 << 0;
-+const FLAG_SAMPLE_VALID: u8 = 1 << 1;
-+const FLAG_APP_LIMITED: u8 = 1 << 2;
-+const FLAG_LOSS_DETECTED: u8 = 1 << 3;
-+const FLAG_CWND_SATURATED: u8 = 1 << 4;
-+const FLAG_UNIQUE_PAYLOAD_AVAILABLE: u8 = 1 << 5;
-+const FLAG_SOCKET_SENT_AVAILABLE: u8 = 1 << 6;
++const FLAG_END_OF_ROUND: u16 = 1 << 0;
++const FLAG_SAMPLE_VALID: u16 = 1 << 1;
++const FLAG_APP_LIMITED: u16 = 1 << 2;
++const FLAG_LOSS_DETECTED: u16 = 1 << 3;
++const FLAG_CWND_SATURATED: u16 = 1 << 4;
++const FLAG_UNIQUE_PAYLOAD_AVAILABLE: u16 = 1 << 5;
++const FLAG_SOCKET_SENT_AVAILABLE: u16 = 1 << 6;
++const FLAG_EVENT_PATH_CHANGED: u16 = 1 << 7;
++const FLAG_EVENT_APP_LIMITED: u16 = 1 << 8;
++const FLAG_EVENT_RECEIVER_LIMITED: u16 = 1 << 9;
++const FLAG_EVENT_POLICY_LIMITED: u16 = 1 << 10;
++const FLAG_EVENT_LOSS: u16 = 1 << 11;
++const FLAG_EVENT_PTO: u16 = 1 << 12;
 +
 +/// Frozen p1-baseline-v3 reason codes.
 +///
@@ -121,9 +127,8 @@ new file mode 100644
 +    actual_socket_sent_bytes: u64,
 +    baseline_cwnd_bytes: u32,
 +    phase: BabrBbrPhase,
-+    reason: BabrReasonCode,
 +    shadow_reason: BabrReasonCode,
-+    flags: u8,
++    flags: u16,
 +}
 +
 +#[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +214,31 @@ new file mode 100644
 +        None
 +    }
 +
++    fn event_flags(&self, guards: BabrTransportGuardCounters) -> u16 {
++        let mut flags = 0_u16;
++        if guards.path_changed_events > self.last_guards.path_changed_events {
++            flags |= FLAG_EVENT_PATH_CHANGED;
++        }
++        if guards.app_limited_events > self.last_guards.app_limited_events {
++            flags |= FLAG_EVENT_APP_LIMITED;
++        }
++        if guards.receiver_limited_events >
++            self.last_guards.receiver_limited_events
++        {
++            flags |= FLAG_EVENT_RECEIVER_LIMITED;
++        }
++        if guards.policy_limited_events > self.last_guards.policy_limited_events {
++            flags |= FLAG_EVENT_POLICY_LIMITED;
++        }
++        if guards.loss_events > self.last_guards.loss_events {
++            flags |= FLAG_EVENT_LOSS;
++        }
++        if guards.pto_events > self.last_guards.pto_events {
++            flags |= FLAG_EVENT_PTO;
++        }
++        flags
++    }
++
 +    fn shadow_reason(
 +        &self, snapshot: BabrRecoveryObserveSnapshot,
 +    ) -> BabrReasonCode {
@@ -241,6 +271,7 @@ new file mode 100644
 +        }
 +
 +        let shadow_reason = self.shadow_reason(snapshot);
++        let event_flags = self.event_flags(snapshot.guards);
 +        self.last_guards = snapshot.guards;
 +
 +        let epoch = *self.epoch.get_or_insert(now);
@@ -249,7 +280,7 @@ new file mode 100644
 +            .as_micros()
 +            .min(u64::MAX as u128) as u64;
 +
-+        let mut flags = 0_u8;
++        let mut flags = event_flags;
 +        if snapshot.bbr.end_of_round_trip {
 +            flags |= FLAG_END_OF_ROUND;
 +        }
@@ -309,8 +340,6 @@ new file mode 100644
 +            actual_socket_sent_bytes,
 +            baseline_cwnd_bytes,
 +            phase: snapshot.bbr.phase,
-+            // Observe never applies the candidate to transport output.
-+            reason: BabrReasonCode::ModeNotLite,
 +            shadow_reason,
 +            flags,
 +        });
@@ -342,7 +371,7 @@ new file mode 100644
 +            record.seq,
 +            record.elapsed_micros,
 +            record.phase.as_str(),
-+            record.reason.as_str(),
++            BabrReasonCode::ModeNotLite.as_str(),
 +            record.shadow_reason.as_str(),
 +            record.baseline_pacing_rate_bytes_per_second,
 +            record.baseline_cwnd_bytes,
@@ -578,10 +607,39 @@ new file mode 100644
 +        telemetry.record_if_interesting(now, s);
 +
 +        assert_eq!(telemetry.stats().records, 1);
++        assert_ne!(
++            telemetry.records.front().unwrap().flags & FLAG_EVENT_PTO,
++            0
++        );
 +        let lines = telemetry.take_json_lines(now);
 +        assert_eq!(lines.len(), 1);
 +        assert!(lines[0].contains("\"shadow_reason\":\"PTO_FIRED\""));
 +        assert!(lines[0].contains("\"reason\":\"MODE_NOT_LITE\""));
++    }
++
++    #[test]
++    fn simultaneous_guard_events_remain_visible_in_flags() {
++        let now = Instant::now();
++        let baseline = BabrTransportGuardCounters::default();
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, baseline);
++
++        let mut guards = baseline;
++        guards.path_changed_events = 1;
++        guards.last_path_id = Some(3);
++        guards.loss_events = 1;
++        guards.loss_packets = 1;
++        guards.pto_events = 1;
++        guards.last_pto_count = 1;
++
++        telemetry.record_if_interesting(
++            now,
++            snapshot(BabrBbrPhase::ProbeBwCruise, guards),
++        );
++        let record = telemetry.records.front().unwrap();
++        assert_ne!(record.flags & FLAG_EVENT_PATH_CHANGED, 0);
++        assert_ne!(record.flags & FLAG_EVENT_LOSS, 0);
++        assert_ne!(record.flags & FLAG_EVENT_PTO, 0);
 +    }
 +
 +    #[test]
