@@ -149,7 +149,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +    /// BABR Observe-only connection-level unique STREAM delivery ledger.
 +    babr_unique_payload: BabrUniquePayloadTracker,
 +
-     /// Streams map.
+     /// Streams map, indexed by stream ID.
 @@ -2099,4 +2176,5 @@ impl<F: BufFactory> Connection<F> {
              acked_bytes: 0,
              lost_bytes: 0,
