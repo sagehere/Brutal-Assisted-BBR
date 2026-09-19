@@ -33,7 +33,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             cmake clang pkg-config perl nasm \
-            iproute2 iputils-ping
+            iproute2 iputils-ping iperf3
 
       - name: Apply frozen-host Observe patches
         run: bash tools/p2/apply-host-patches.sh
