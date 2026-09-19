@@ -28,12 +28,23 @@ if [[ "${ACTUAL_QUICHE_SHA}" != "${EXPECTED_QUICHE_SHA}" ]]; then
 fi
 
 python3 "${ROOT}/阶段任务书/check_p1_rules.py" 2>&1 | tee "${LOG_DIR}/check-p1-rules.log"
+python3 "${ROOT}/阶段任务书/check_p1_spec_consistency.py" 2>&1 | tee "${LOG_DIR}/check-p1-spec-consistency.log"
 
 cargo test   --manifest-path "${ROOT}/third_party/quiche-0.29.3/Cargo.toml"   -p quiche   --lib   --features gcongestion   2>&1 | tee "${LOG_DIR}/quiche-test.log"
 
 (
   cd "${ROOT}"
-  sha256sum     "阶段任务书/check_p1_rules.py"     "阶段任务书/P1-冻结参数与用例.json"     "阶段任务书/P1-修订规格与冻结基线.md"     "阶段任务书/P1-恢复与IO事件桥接设计.md"     "third_party/quiche-0.29.3/quiche/src/recovery/gcongestion/bbr2.rs"     "third_party/quiche-0.29.3/quiche/src/recovery/gcongestion/recovery.rs"     "third_party/quiche-0.29.3/tokio-quiche/src/quic/io/worker.rs"
+  sha256sum \
+    "阶段任务书/check_p1_rules.py" \
+    "阶段任务书/check_p1_spec_consistency.py" \
+    "阶段任务书/P1-冻结参数与用例.json" \
+    "阶段任务书/P1-修订规格与冻结基线.md" \
+    "阶段任务书/P1-恢复与IO事件桥接设计.md" \
+    "阶段任务书/P1-冻结参数来源表.md" \
+    "阶段任务书/P1-Final-验收矩阵.md" \
+    "third_party/quiche-0.29.3/quiche/src/recovery/gcongestion/bbr2.rs" \
+    "third_party/quiche-0.29.3/quiche/src/recovery/gcongestion/recovery.rs" \
+    "third_party/quiche-0.29.3/tokio-quiche/src/quic/io/worker.rs"
 ) | tee "${LOG_DIR}/sha256.txt"
 
-echo "P1 verification PASS" | tee "${LOG_DIR}/result.txt"
+echo "P1 Final Closure verification PASS" | tee "${LOG_DIR}/result.txt"
