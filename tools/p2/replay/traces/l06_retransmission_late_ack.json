@@ -1,0 +1,51 @@
+{
+  "schema_version": "p2-accounting-replay-v1",
+  "case": "L06",
+  "description": "First send is lost, retransmission succeeds, then original packet is acknowledged late.",
+  "events": [
+    {
+      "type": "send",
+      "packet_id": 100,
+      "actual_socket_bytes": 1250,
+      "payload": [
+        {
+          "stream_id": 4,
+          "offset": 0,
+          "length": 1200
+        }
+      ]
+    },
+    {
+      "type": "loss",
+      "packet_id": 100
+    },
+    {
+      "type": "send",
+      "packet_id": 101,
+      "actual_socket_bytes": 1250,
+      "payload": [
+        {
+          "stream_id": 4,
+          "offset": 0,
+          "length": 1200
+        }
+      ]
+    },
+    {
+      "type": "ack",
+      "packet_id": 101
+    },
+    {
+      "type": "ack",
+      "packet_id": 100
+    }
+  ],
+  "expect": {
+    "actual_socket_sent_bytes": 2500,
+    "unique_payload_delivered_bytes": 1200,
+    "sent_packets": 2,
+    "loss_events": 1,
+    "ack_events": 2,
+    "spurious_ack_events": 1
+  }
+}
