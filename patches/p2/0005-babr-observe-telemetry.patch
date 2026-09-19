@@ -20,7 +20,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/reco
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
-@@ -0,0 +1,529 @@
+@@ -0,0 +1,549 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -441,11 +441,31 @@ new file mode 100644
 +        ];
 +        let strings: Vec<&str> = codes.iter().map(|c| c.as_str()).collect();
 +
-+        assert_eq!(strings.len(), 20);
-+        assert!(strings.contains(&"MODE_NOT_LITE"));
-+        assert!(strings.contains(&"LOSS_DETECTED"));
-+        assert!(strings.contains(&"ASSIST_BUDGET_EXHAUSTED"));
-+        assert!(strings.contains(&"BOUNDED_PROBE"));
++        assert_eq!(
++            strings,
++            vec![
++                "TARGET_DISABLED",
++                "INVALID_TARGET",
++                "MODE_NOT_LITE",
++                "PATH_CHANGED",
++                "APP_LIMITED",
++                "RECEIVER_LIMITED",
++                "POLICY_LIMITED",
++                "BBR_PHASE_PROTECTED",
++                "LOSS_DETECTED",
++                "PTO_FIRED",
++                "BACKOFF_ACTIVE",
++                "SAMPLE_INVALID",
++                "TARGET_NEAR",
++                "ASSIST_TIMEOUT",
++                "ASSIST_BUDGET_EXHAUSTED",
++                "MAX_ROUNDS",
++                "HARD_QUEUE_DELAY",
++                "NO_BENEFIT",
++                "SOFT_FREEZE",
++                "BOUNDED_PROBE",
++            ]
++        );
 +    }
 +
 +    #[test]
