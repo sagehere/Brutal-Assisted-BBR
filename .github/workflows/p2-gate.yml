@@ -44,6 +44,14 @@ jobs:
             --lib \
             --features gcongestion
 
+      - name: Build and test patched tokio-quiche IO bridge
+        run: |
+          cargo test \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p tokio-quiche \
+            --lib \
+            --features gcongestion
+
       - name: Verify patch remains behavior-read-only at integration boundary
         run: |
           git -C third_party/quiche-0.29.3 diff --check
@@ -51,6 +59,9 @@ jobs:
             quiche/src/recovery/gcongestion/bbr2.rs \
             quiche/src/recovery/gcongestion/pacer.rs \
             quiche/src/recovery/gcongestion/recovery.rs \
+            quiche/src/recovery/mod.rs \
+            quiche/src/lib.rs \
+            tokio-quiche/src/quic/io/worker.rs \
             > /tmp/p2-observe-host.diff
           ! grep -E '^[+].*(final_pacing|set_pacing|limit_cwnd\(|can_send\(|max_pacing_rate =|burst_tokens =)' /tmp/p2-observe-host.diff
 
