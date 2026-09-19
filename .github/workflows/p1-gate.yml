@@ -2,6 +2,13 @@ name: P1 Final Gate
 
 on:
   pull_request:
+    paths:
+      - "阶段任务书/verify_p1.sh"
+      - "阶段任务书/P1-**"
+      - "阶段任务书/00-阶段总览与执行约定.md"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p1-gate.yml"
   workflow_dispatch:
 
 jobs:
