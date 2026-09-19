@@ -1,14 +1,19 @@
 {
-  "schema_version": "p1-baseline-v1",
-  "configuration_version": "2026-09-18-p1",
+  "schema_version": "p1-baseline-v2",
+  "configuration_version": "2026-09-19-p1",
   "scope": {
     "transport": "QUIC",
     "direction": "one-way sender",
     "traffic": "continuous bulk data in a controlled long-lived connection",
     "host": "Cloudflare quiche 0.29.3",
-    "host_commit": "55886df3be579579207104c8e645825b6347a209"
+    "host_commit": "55886df3be579579207104c8e645825b6347a209",
+    "io_adapter": "tokio-quiche at the same frozen upstream commit for socket-success telemetry"
   },
-  "units": {"rate": "byte/s", "window": "byte", "time": "ms"},
+  "units": {
+    "rate": "byte/s",
+    "window": "byte",
+    "time": "ms"
+  },
   "target": {
     "minimum_nonzero_byte_per_s": 1000000,
     "maximum_byte_per_s": 125000000,
@@ -16,7 +21,11 @@
     "exit_ratio": 0.9
   },
   "assist": {
-    "allowed_bbr_phase": ["ProbeBW.Refill", "ProbeBW.Up", "ProbeBW.Cruise"],
+    "allowed_bbr_phase": [
+      "ProbeBW.Refill",
+      "ProbeBW.Up",
+      "ProbeBW.Cruise"
+    ],
     "max_relative_rate_gain": 1.1,
     "weight_step_per_bbr_round": 0.05,
     "max_duration_ms": 300,
@@ -25,7 +34,8 @@
     "minimum_increment_byte_per_s": 1000000,
     "no_benefit_round": 2,
     "minimum_model_gain_ratio": 1.02,
-    "max_unrevocable_queue_bytes": 2400
+    "max_unrevocable_queue_bytes": 2400,
+    "budget_accounting": "pre-debit generated assist datagram bytes; no refund on socket failure"
   },
   "guards": {
     "soft_queue_delay_min_ms": 10,
@@ -44,7 +54,8 @@
     "ring_entries_per_connection": 4096,
     "maximum_serialized_bytes_per_minute": 1048576,
     "cpu_p95_overhead_ratio": 0.02,
-    "memory_bytes_per_connection": 262144
+    "memory_bytes_per_connection": 262144,
+    "actual_sent_accounting": "socket/GSO successful returned bytes only"
   },
   "acceptance": {
     "primary": "500->100->500 Mbps, Target=200 Mbps; time to 0.9T improves by >=20%",
@@ -53,5 +64,12 @@
     "send_cost_increase_ratio": 0.1,
     "fairness_competitor_loss_ratio": 0.1,
     "minimum_runs_per_key_scenario": 10
+  },
+  "capabilities": {
+    "bbr_is_in_recovery": "not_used",
+    "pto_event": "supported via recovery on_loss_detection_timeout",
+    "loss_event": "supported via recovery loss detection",
+    "persistent_congestion_signal": "unsupported in frozen host; do not synthesize",
+    "ecn_ce_signal": "unsupported for BABR control in frozen host; do not synthesize"
   }
 }
