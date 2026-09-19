@@ -6,7 +6,7 @@ source "$HERE/common.sh"
 require_root
 require_cmds
 
-"$HERE/cleanup.sh" >/dev/null
+bash "$HERE/cleanup.sh" >/dev/null
 
 ip netns add "$NS_S"
 ip netns add "$NS_R"
