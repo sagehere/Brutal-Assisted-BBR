@@ -1,0 +1,283 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -54,8 +54,101 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
+ use super::bbr2::BabrObserveSnapshot;
+ use super::bbr2::BBRv2;
+ use super::pacer::Pacer;
+ use super::Acked;
+ use super::Lost;
+ 
++/// Transport/recovery events that can only make future BABR assistance more
++/// conservative. Observe records them; it never turns them into send control.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrTransportGuardEvent {
++    LossDetected {
++        lost_bytes: usize,
++        lost_packets: usize,
++    },
++    PtoFired {
++        pto_count: u32,
++    },
++    AppLimited,
++    PathChanged {
++        path_id: u64,
++    },
++    ReceiverLimited,
++    PolicyLimited,
++}
++
++/// Monotonic Observe counters avoid dropping guard events between snapshots.
++#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrTransportGuardCounters {
++    pub(crate) loss_events: u64,
++    pub(crate) loss_bytes: u64,
++    pub(crate) loss_packets: u64,
++    pub(crate) pto_events: u64,
++    pub(crate) last_pto_count: u32,
++    pub(crate) app_limited_events: u64,
++    pub(crate) path_changed_events: u64,
++    pub(crate) last_path_id: Option<u64>,
++    pub(crate) receiver_limited_events: u64,
++    pub(crate) policy_limited_events: u64,
++}
++
++impl BabrTransportGuardCounters {
++    fn record(&mut self, event: BabrTransportGuardEvent) {
++        match event {
++            BabrTransportGuardEvent::LossDetected {
++                lost_bytes,
++                lost_packets,
++            } => {
++                self.loss_events = self.loss_events.saturating_add(1);
++                self.loss_bytes =
++                    self.loss_bytes.saturating_add(lost_bytes as u64);
++                self.loss_packets =
++                    self.loss_packets.saturating_add(lost_packets as u64);
++            },
++            BabrTransportGuardEvent::PtoFired { pto_count } => {
++                self.pto_events = self.pto_events.saturating_add(1);
++                self.last_pto_count = pto_count;
++            },
++            BabrTransportGuardEvent::AppLimited => {
++                self.app_limited_events =
++                    self.app_limited_events.saturating_add(1);
++            },
++            BabrTransportGuardEvent::PathChanged { path_id } => {
++                self.path_changed_events =
++                    self.path_changed_events.saturating_add(1);
++                self.last_path_id = Some(path_id);
++            },
++            BabrTransportGuardEvent::ReceiverLimited => {
++                self.receiver_limited_events =
++                    self.receiver_limited_events.saturating_add(1);
++            },
++            BabrTransportGuardEvent::PolicyLimited => {
++                self.policy_limited_events =
++                    self.policy_limited_events.saturating_add(1);
++            },
++        }
++    }
++}
++
++/// Accounting names are intentionally non-overlapping.
++///
++/// `recovery_packet_bytes_sent` is not socket-success accounting, and
++/// `transport_acked_bytes` is not unique-payload goodput. The two metrics
++/// that require later bridges stay `None` until those bridges exist.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrObserveAccounting {
++    pub(crate) model_delivery_rate_bytes_per_second: u64,
++    pub(crate) recovery_packet_bytes_sent: u64,
++    pub(crate) transport_acked_bytes: u64,
++    pub(crate) transport_lost_bytes: u64,
++    pub(crate) unique_payload_delivered_bytes: Option<u64>,
++    pub(crate) actual_socket_sent_bytes: Option<u64>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrRecoveryObserveSnapshot {
++    pub(crate) bbr: BabrObserveSnapshot,
++    pub(crate) guards: BabrTransportGuardCounters,
++    pub(crate) accounting: BabrObserveAccounting,
++}
+ 
+ // Congestion Control
+@@ -323,7 +323,9 @@ pub struct GRecovery {
+     bytes_in_flight: BytesInFlight,
+ 
+     bytes_sent: usize,
++    babr_transport_acked_bytes: u64,
++    babr_guard_counters: BabrTransportGuardCounters,
+ 
+     pub bytes_lost: u64,
+ 
+     max_datagram_size: usize,
+@@ -353,5 +353,38 @@ impl GRecovery {
+-    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+-        self.pacer.babr_observe_snapshot()
++    pub(crate) fn babr_observe_snapshot(&self) -> BabrRecoveryObserveSnapshot {
++        let bbr = self.pacer.babr_observe_snapshot();
++        let accounting = BabrObserveAccounting {
++            model_delivery_rate_bytes_per_second:
++                bbr.model_delivery_rate_bytes_per_second,
++            recovery_packet_bytes_sent: self.bytes_sent as u64,
++            transport_acked_bytes: self.babr_transport_acked_bytes,
++            transport_lost_bytes: self.babr_guard_counters.loss_bytes,
++            unique_payload_delivered_bytes: None,
++            actual_socket_sent_bytes: None,
++        };
++
++        BabrRecoveryObserveSnapshot {
++            bbr,
++            guards: self.babr_guard_counters,
++            accounting,
++        }
+     }
+ 
++    /// Path identity must come from the connection/path layer. Recovery does
++    /// not infer migration from RTT changes.
++    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
++        self.babr_guard_counters.record(
++            BabrTransportGuardEvent::PathChanged { path_id },
++        );
++    }
++
++    pub(crate) fn babr_on_receiver_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::ReceiverLimited);
++    }
++
++    pub(crate) fn babr_on_policy_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::PolicyLimited);
++    }
++
+     pub fn new(recovery_config: &RecoveryConfig) -> Option<Self> {
+@@ -391,6 +391,8 @@ impl GRecovery {
+             loss_thresh: LossThreshold::new(recovery_config),
+             bytes_in_flight: Default::default(),
+             bytes_sent: 0,
++            babr_transport_acked_bytes: 0,
++            babr_guard_counters: Default::default(),
+             bytes_lost: 0,
+ 
+             max_datagram_size: recovery_config.max_send_udp_payload_size,
+@@ -637,8 +637,12 @@ impl RecoveryOps for GRecovery {
+         } = self.epochs[epoch].detect_and_remove_acked_packets(
+             peer_sent_ack_ranges,
+             &mut self.newly_acked,
+             skip_pn,
+             trace_id,
+         )?;
+ 
++        self.babr_transport_acked_bytes = self
++            .babr_transport_acked_bytes
++            .saturating_add(acked_bytes as u64);
++
+         self.lost_spurious_count += spurious_losses;
+@@ -682,4 +682,13 @@ impl RecoveryOps for GRecovery {
+         let (lost_bytes, lost_packets) =
+             self.detect_and_remove_lost_packets(epoch, now);
+ 
++        if lost_packets > 0 {
++            self.babr_guard_counters.record(
++                BabrTransportGuardEvent::LossDetected {
++                    lost_bytes,
++                    lost_packets,
++                },
++            );
++        }
++
+         self.pacer.on_congestion_event(
+@@ -731,4 +731,13 @@ impl RecoveryOps for GRecovery {
+             let (lost_bytes, lost_packets) =
+                 self.detect_and_remove_lost_packets(epoch, now);
+ 
++            if lost_packets > 0 {
++                self.babr_guard_counters.record(
++                    BabrTransportGuardEvent::LossDetected {
++                        lost_bytes,
++                        lost_packets,
++                    },
++                );
++            }
++
+             self.pacer.on_congestion_event(
+@@ -775,4 +775,9 @@ impl RecoveryOps for GRecovery {
+ 
+         self.pto_count += 1;
++        self.babr_guard_counters.record(
++            BabrTransportGuardEvent::PtoFired {
++                pto_count: self.pto_count,
++            },
++        );
+ 
+         let epoch = &mut self.epochs[epoch];
+@@ -879,5 +879,7 @@ impl RecoveryOps for GRecovery {
+ 
+     // FIXME only used by gcongestion
+     fn on_app_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::AppLimited);
+         self.pacer.on_app_limited(self.bytes_in_flight.get())
+     }
+@@ -1060,5 +1060,58 @@ mod tests {
+         assert_eq!(loss_thresh.time_thresh(), MAX_TIME_THRESHOLD);
+     }
+ 
++    fn new_babr_recovery() -> GRecovery {
++        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
++        config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
++        let recovery_config = RecoveryConfig::from_config(&config);
++        GRecovery::new(&recovery_config).unwrap()
++    }
++
++    #[test]
++    fn babr_observe_accounting_keeps_unavailable_metrics_unknown() {
++        let r = new_babr_recovery();
++        let snapshot = r.babr_observe_snapshot();
++
++        assert_eq!(snapshot.accounting.recovery_packet_bytes_sent, 0);
++        assert_eq!(snapshot.accounting.transport_acked_bytes, 0);
++        assert_eq!(snapshot.accounting.transport_lost_bytes, 0);
++        assert_eq!(snapshot.accounting.unique_payload_delivered_bytes, None);
++        assert_eq!(snapshot.accounting.actual_socket_sent_bytes, None);
++    }
++
++    #[test]
++    fn babr_external_guard_sources_are_explicit() {
++        let mut r = new_babr_recovery();
++        r.babr_on_path_changed(7);
++        r.babr_on_receiver_limited();
++        r.babr_on_policy_limited();
++        let guards = r.babr_observe_snapshot().guards;
++
++        assert_eq!(guards.path_changed_events, 1);
++        assert_eq!(guards.last_path_id, Some(7));
++        assert_eq!(guards.receiver_limited_events, 1);
++        assert_eq!(guards.policy_limited_events, 1);
++    }
++
++    #[test]
++    fn babr_true_pto_records_guard_event() {
++        let mut r = new_babr_recovery();
++        let handshake_status = HandshakeStatus {
++            completed: true,
++            has_handshake_keys: true,
++            peer_verified_address: true,
++        };
++
++        let _ = r.on_loss_detection_timeout(
++            handshake_status,
++            Instant::now(),
++            "babr-pto-test",
++        );
++        let guards = r.babr_observe_snapshot().guards;
++
++        assert_eq!(guards.pto_events, 1);
++        assert_eq!(guards.last_pto_count, 1);
++    }
++
+     #[test]
+     fn test_high_pto_count_no_panic() {
