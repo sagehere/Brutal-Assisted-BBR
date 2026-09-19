@@ -1,0 +1,57 @@
+{
+  "schema_version": "p1-baseline-v1",
+  "configuration_version": "2026-09-18-p1",
+  "scope": {
+    "transport": "QUIC",
+    "direction": "one-way sender",
+    "traffic": "continuous bulk data in a controlled long-lived connection",
+    "host": "Cloudflare quiche 0.29.3",
+    "host_commit": "55886df3be579579207104c8e645825b6347a209"
+  },
+  "units": {"rate": "byte/s", "window": "byte", "time": "ms"},
+  "target": {
+    "minimum_nonzero_byte_per_s": 1000000,
+    "maximum_byte_per_s": 125000000,
+    "enter_ratio": 0.8,
+    "exit_ratio": 0.9
+  },
+  "assist": {
+    "allowed_bbr_phase": ["ProbeBW.Refill", "ProbeBW.Up", "ProbeBW.Cruise"],
+    "max_relative_rate_gain": 1.1,
+    "weight_step_per_bbr_round": 0.05,
+    "max_duration_ms": 300,
+    "max_rounds": 3,
+    "budget_duration_cap_ms": 300,
+    "minimum_increment_byte_per_s": 1000000,
+    "no_benefit_round": 2,
+    "minimum_model_gain_ratio": 1.02,
+    "max_unrevocable_queue_bytes": 2400
+  },
+  "guards": {
+    "soft_queue_delay_min_ms": 10,
+    "soft_queue_delay_min_rtt_ratio": 0.25,
+    "hard_queue_delay_min_ms": 20,
+    "hard_queue_delay_min_rtt_ratio": 0.5,
+    "sample_max_age_rounds": 1,
+    "minimum_efficiency_increment_byte_per_s": 1000000
+  },
+  "backoff": {
+    "base_ms": 30000,
+    "maximum_ms": 600000,
+    "failure_counter_scope": "connection-path identity; a target, idle, mode, or transient RTT change never clears it"
+  },
+  "telemetry": {
+    "ring_entries_per_connection": 4096,
+    "maximum_serialized_bytes_per_minute": 1048576,
+    "cpu_p95_overhead_ratio": 0.02,
+    "memory_bytes_per_connection": 262144
+  },
+  "acceptance": {
+    "primary": "500->100->500 Mbps, Target=200 Mbps; time to 0.9T improves by >=20%",
+    "secondary": "500 Mbps, Target=200 Mbps, 1% and 5% random loss",
+    "normal_goodput_regression_ratio": 0.03,
+    "send_cost_increase_ratio": 0.1,
+    "fairness_competitor_loss_ratio": 0.1,
+    "minimum_runs_per_key_scenario": 10
+  }
+}
