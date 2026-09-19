@@ -47,6 +47,18 @@ require_cmds() {
 delete_ns_if_present() {
   local ns="$1"
   if ip netns list | awk '{print $1}' | grep -Fxq "$ns"; then
+    # A deleted namespace can otherwise stay alive while a leaked process still
+    # holds it. Terminate namespace processes first so repeated experiments do
+    # not accumulate hidden servers or sockets.
+    mapfile -t pids < <(ip netns pids "$ns" 2>/dev/null || true)
+    if (("${#pids[@]}" > 0)); then
+      kill -TERM "${pids[@]}" 2>/dev/null || true
+      sleep 0.1
+      mapfile -t pids < <(ip netns pids "$ns" 2>/dev/null || true)
+      if (("${#pids[@]}" > 0)); then
+        kill -KILL "${pids[@]}" 2>/dev/null || true
+      fi
+    fi
     ip netns del "$ns"
   fi
 }
