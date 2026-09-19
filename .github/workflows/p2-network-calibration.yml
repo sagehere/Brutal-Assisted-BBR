@@ -1,0 +1,36 @@
+name: P2 Network Calibration
+
+on:
+  pull_request:
+    paths:
+      - "tools/p2/netns/**"
+      - ".github/workflows/p2-network-calibration.yml"
+      - "阶段任务书/P2-网络环境校准.md"
+  workflow_dispatch:
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install network calibration dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 iputils-ping iperf3
+
+      - name: Calibrate netns netem tbf path
+        run: |
+          sudo -E bash tools/p2/netns/calibrate.sh
+
+      - name: Upload network calibration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-network-calibration-${{ github.sha }}
+          path: 阶段任务书/p2-network-artifacts
+          if-no-files-found: error
