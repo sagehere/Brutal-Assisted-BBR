@@ -40,9 +40,13 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +            babr_actual_socket_sent_bytes: 0,
              bytes_lost: 0,
  
-@@ -1230,7 +1245,14 @@ mod tests {
+@@ -1230,11 +1245,18 @@ mod tests {
+     #[test]
+     fn babr_observe_accounting_keeps_unavailable_metrics_unknown() {
 -        let r = new_babr_recovery();
 +        let mut r = new_babr_recovery();
+         let snapshot = r.babr_observe_snapshot();
+ 
          assert_eq!(snapshot.accounting.recovery_packet_bytes_sent, 0);
          assert_eq!(snapshot.accounting.transport_acked_bytes, 0);
          assert_eq!(snapshot.accounting.transport_lost_bytes, 0);
