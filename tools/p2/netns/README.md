@@ -38,8 +38,7 @@ BABR_LOSS_PCT=1
 sudo -E bash tools/p2/netns/calibrate.sh
 ```
 
-Calibration is a capability/effectiveness gate only. It proves namespace,
-routing, `netem`, `tbf`, RTT, and bottleneck-rate control are reproducible.
+Calibration uses four parallel TCP streams to saturate the configured TBF; this avoids treating a single flow's congestion-window/socket-buffer ramp as a shaper failure. It is a capability/effectiveness gate only. It proves namespace, routing, `netem`, `tbf`, RTT, and bottleneck-rate control are reproducible.
 It does **not** count as BABR Observe or Lite network evidence by itself.
 
 Artifacts are written to `阶段任务书/p2-network-artifacts/` and are uploaded by
