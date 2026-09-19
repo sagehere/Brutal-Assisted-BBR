@@ -1,7 +1,7 @@
 diff --git a/quiche/src/ranges.rs b/quiche/src/ranges.rs
 --- a/quiche/src/ranges.rs
 +++ b/quiche/src/ranges.rs
-@@ -120,4 +120,43 @@ impl RangeSet {
+@@ -120,5 +120,55 @@ impl RangeSet {
          self.fixup();
      }
  
@@ -101,7 +101,7 @@ diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
 diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 --- a/quiche/src/lib.rs
 +++ b/quiche/src/lib.rs
-@@ -3698,13 +3698,11 @@ impl<F: BufFactory> Connection<F> {
+@@ -3698,13 +3698,12 @@ impl<F: BufFactory> Connection<F> {
                              None => continue,
                          };
  
