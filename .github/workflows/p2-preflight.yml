@@ -1,0 +1,25 @@
+name: P2 Preflight
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/**"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-preflight.yml"
+  workflow_dispatch:
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Validate P2 scripts and patch stack
+        run: bash tools/p2/preflight.sh
