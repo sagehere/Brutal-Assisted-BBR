@@ -116,8 +116,15 @@ def run():
 
 
 def _unreachable():
-    result = decide(base_event(target=25_000_000, baseline_rate=18_750_000, srtt_ms=52),
-                    {"rounds": 2, "reference_rate": 18_750_000})
+    result = decide(
+        base_event(
+            target=25_000_000,
+            baseline_rate=18_750_000,
+            model_delivery_rate=18_750_000,
+            srtt_ms=52,
+        ),
+        {"rounds": 2, "reference_rate": 18_750_000},
+    )
     assert result["reason"] == "no_benefit" and result["state"] == "BACKOFF"
 
 
