@@ -89,6 +89,35 @@ wait_for_server() {
   return 1
 }
 
+process_cpu_runtime_ns() {
+  local pid="$1"
+
+  python3 - "$pid" <<'PY'
+from pathlib import Path
+import sys
+
+pid = sys.argv[1]
+task_dir = Path("/proc") / pid / "task"
+total = 0
+seen = 0
+
+for schedstat in list(task_dir.glob("*/schedstat")):
+    try:
+        fields = schedstat.read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        continue
+    if not fields:
+        continue
+    total += int(fields[0])
+    seen += 1
+
+if seen == 0:
+    raise SystemExit(f"no schedstat threads found for pid {pid}")
+
+print(total)
+PY
+}
+
 stop_server() {
   local metrics_file="$1"
 
@@ -183,13 +212,18 @@ run_transfer() {
   SERVER_PID="$(cat "$pid_file")"
   wait_for_server
 
-  local start_ns end_ns
+  local start_ns end_ns cpu_start_ns cpu_end_ns
+  cpu_start_ns="$(process_cpu_runtime_ns "$SERVER_PID")"
   start_ns="$(date +%s%N)"
 
   ip netns exec "$NS_S" env RUST_LOG=warn     "$CLIENT_BIN"       "https://test.com/stream-bytes/$bytes"       --no-verify       --connect-to "$D_IP:$PORT"       --http-version HTTP/3       --max-data 2147483648       --max-window 2147483648       --max-stream-data 2147483648       --max-stream-window 2147483648       --idle-timeout 120000       --dump-responses "$run_dir/response"     > "$run_dir/client.log" 2>&1
 
   end_ns="$(date +%s%N)"
+  # Allow connection-final telemetry drain to complete, then snapshot only
+  # scheduled CPU consumed during the measured transfer window. Server
+  # startup/listen and shutdown CPU remain diagnostics, not gate input.
   sleep 0.25
+  cpu_end_ns="$(process_cpu_runtime_ns "$SERVER_PID")"
 
   ip netns exec "$NS_R" tc -s qdisc show dev "$R_S_IF"     > "$run_dir/qdisc-router-to-sender.txt"
   ip netns exec "$NS_R" tc -s qdisc show dev "$R_D_IF"     > "$run_dir/qdisc-router-to-receiver.txt"
@@ -245,7 +279,7 @@ run_transfer() {
 
   stop_server "$rusage"
 
-  python3 -     "$start_ns" "$end_ns" "$bytes" "${BABR_RATE_MBIT:-100}"     "$tbf_sent_bytes" "$mode" "$rusage" "$trace" "$run_dir/metrics.json" <<'PY'
+  python3 -     "$start_ns" "$end_ns" "$cpu_start_ns" "$cpu_end_ns"     "$bytes" "${BABR_RATE_MBIT:-100}" "$tbf_sent_bytes" "$mode"     "$rusage" "$trace" "$run_dir/metrics.json" <<'PY'
 import json
 import os
 import sys
@@ -253,6 +287,8 @@ import sys
 (
     start_ns,
     end_ns,
+    cpu_start_ns,
+    cpu_end_ns,
     flow_bytes,
     rate_mbit,
     tbf_sent_bytes,
@@ -281,7 +317,13 @@ metrics = {
     "minimum_elapsed_for_115pct_rate_seconds": min_elapsed,
     "bottleneck_timing_pass": elapsed >= min_elapsed,
     "tbf_sent_bytes": int(tbf_sent_bytes),
-    "server_cpu_seconds": rusage["cpu_seconds"],
+    "server_cpu_seconds": (
+        int(cpu_end_ns) - int(cpu_start_ns)
+    ) / 1_000_000_000,
+    "server_cpu_metric": (
+        "sum /proc/<pid>/task/*/schedstat runtime in measured transfer window"
+    ),
+    "server_lifetime_cpu_seconds": rusage["cpu_seconds"],
     "server_user_cpu_seconds": rusage["user_cpu_seconds"],
     "server_system_cpu_seconds": rusage["system_cpu_seconds"],
     "server_max_rss_kib": rusage["max_rss_kib"],
@@ -385,7 +427,10 @@ throughput_values = [r["throughput_ratio"] for r in rows]
 summary = {
     "schema": "p2-observe-overhead-summary-v1",
     "pairs": count,
-    "cpu_metric": "paired server process (user+sys CPU seconds), same payload",
+    "cpu_metric": (
+        "paired server scheduled CPU seconds during measured transfer window, "
+        "same payload; startup/listen/shutdown excluded"
+    ),
     "cpu_p95_method": "nearest-rank",
     "cpu_p95_overhead_ratio": nearest_rank_p(cpu_values, 0.95),
     "cpu_median_overhead_ratio": statistics.median(cpu_values),
