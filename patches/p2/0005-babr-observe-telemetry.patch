@@ -835,6 +835,10 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +            .path_id_from_addrs(&(from, to))
 +            .ok_or(Error::InvalidState)?;
 +
++        // Unique-payload accounting is Observe-only. Off must not pay the
++        // CPU or memory cost of shadow measurement.
++        self.babr_observe_accounting_enabled = enabled;
++
 +        if enabled {
 +            // The frozen budget is per connection, not per path. Release any
 +            // prior path ring before enabling the selected real path.
