@@ -25,6 +25,35 @@ assert d["assist"]["max_relative_rate_gain"] == 1.1
 assert d["assist"]["weight_step_per_bbr_round"] == 0.05
 assert d["assist"]["max_duration_ms"] == 300
 assert d["assist"]["max_rounds"] == 3
+assert d["telemetry"]["ring_entries_per_connection"] == 4096
+assert d["telemetry"]["maximum_serialized_bytes_per_minute"] == 1048576
+assert d["telemetry"]["cpu_p95_overhead_ratio"] == 0.02
+assert d["telemetry"]["memory_bytes_per_connection"] == 262144
+assert d["telemetry"]["actual_sent_accounting"] == (
+    "socket/GSO successful returned bytes only"
+)
+assert list(d["reason_codes"].keys()) == [
+    "TARGET_DISABLED",
+    "INVALID_TARGET",
+    "MODE_NOT_LITE",
+    "PATH_CHANGED",
+    "APP_LIMITED",
+    "RECEIVER_LIMITED",
+    "POLICY_LIMITED",
+    "BBR_PHASE_PROTECTED",
+    "LOSS_DETECTED",
+    "PTO_FIRED",
+    "BACKOFF_ACTIVE",
+    "SAMPLE_INVALID",
+    "TARGET_NEAR",
+    "ASSIST_TIMEOUT",
+    "ASSIST_BUDGET_EXHAUSTED",
+    "MAX_ROUNDS",
+    "HARD_QUEUE_DELAY",
+    "NO_BENEFIT",
+    "SOFT_FREEZE",
+    "BOUNDED_PROBE",
+]
 print("P1 frozen contract: OK")
 PY
 
