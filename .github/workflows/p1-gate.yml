@@ -1,0 +1,35 @@
+name: P1 Gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  p1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config perl nasm
+
+      - name: Run P1 verification
+        run: bash "阶段任务书/verify_p1.sh"
+
+      - name: Upload P1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p1-evidence-${{ github.sha }}
+          path: 阶段任务书/p1-artifacts
+          if-no-files-found: warn
