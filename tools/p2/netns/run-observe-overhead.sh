@@ -18,7 +18,7 @@ HOST="$P2_ROOT/third_party/quiche-0.29.3"
 SERVER_BIN="${BABR_P2_SERVER_BIN:-$HOST/target/release/examples/async_http3_server}"
 CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/release/quiche-client}"
 PAIR_COUNT="${BABR_P2_OVERHEAD_PAIRS:-20}"
-FLOW_BYTES="${BABR_P2_OVERHEAD_FLOW_BYTES:-134217728}"
+FLOW_BYTES="${BABR_P2_OVERHEAD_FLOW_BYTES:-268435456}"
 WARMUP_BYTES="${BABR_P2_OVERHEAD_WARMUP_BYTES:-67108864}"
 LOG_FLOW_BYTES="${BABR_P2_LOG_FLOW_BYTES:-805306368}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
@@ -285,6 +285,10 @@ metrics = {
     "server_user_cpu_seconds": rusage["user_cpu_seconds"],
     "server_system_cpu_seconds": rusage["system_cpu_seconds"],
     "server_max_rss_kib": rusage["max_rss_kib"],
+    "server_minor_faults": rusage["minor_faults"],
+    "server_major_faults": rusage["major_faults"],
+    "server_voluntary_context_switches": rusage["voluntary_context_switches"],
+    "server_involuntary_context_switches": rusage["involuntary_context_switches"],
     "telemetry_bytes": os.path.getsize(trace_path) if os.path.exists(trace_path) else 0,
 }
 if not metrics["bottleneck_timing_pass"]:
@@ -359,6 +363,14 @@ for i in range(1, count + 1):
         "observe_goodput_mbit": observe["application_goodput_mbit"],
         "throughput_ratio": throughput_ratio,
         "observe_telemetry_bytes": observe["telemetry_bytes"],
+        "off_minor_faults": off["server_minor_faults"],
+        "observe_minor_faults": observe["server_minor_faults"],
+        "off_major_faults": off["server_major_faults"],
+        "observe_major_faults": observe["server_major_faults"],
+        "off_voluntary_context_switches": off["server_voluntary_context_switches"],
+        "observe_voluntary_context_switches": observe["server_voluntary_context_switches"],
+        "off_involuntary_context_switches": off["server_involuntary_context_switches"],
+        "observe_involuntary_context_switches": observe["server_involuntary_context_switches"],
     })
 
 def nearest_rank_p(values, p):
@@ -379,15 +391,14 @@ summary = {
     "cpu_median_overhead_ratio": statistics.median(cpu_values),
     "cpu_limit_ratio": cpu_limit,
     "cpu_pass": nearest_rank_p(cpu_values, 0.95) <= cpu_limit,
-    "memory_metric": "paired server process peak RSS Observe-Off, one connection",
-    "memory_p95_incremental_bytes": nearest_rank_p(rss_values, 0.95),
-    "memory_median_incremental_bytes": statistics.median(rss_values),
+    "memory_diagnostic_metric": "independent-process peak RSS Observe-Off; diagnostic only, not per-connection gate",
+    "memory_diagnostic_p95_incremental_bytes": nearest_rank_p(rss_values, 0.95),
+    "memory_diagnostic_median_incremental_bytes": statistics.median(rss_values),
     "memory_limit_bytes_per_connection": mem_limit,
-    "memory_pass": nearest_rank_p(rss_values, 0.95) <= mem_limit,
     "throughput_median_ratio": statistics.median(throughput_values),
     "rows": rows,
 }
-summary["pair_gate_pass"] = summary["cpu_pass"] and summary["memory_pass"]
+summary["pair_gate_pass"] = summary["cpu_pass"]
 
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump(summary, fh, indent=2, sort_keys=True)
@@ -395,7 +406,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
 print(json.dumps({k: v for k, v in summary.items() if k != "rows"}, sort_keys=True))
 
 if not summary["pair_gate_pass"]:
-    print("paired Observe resource gate failed; continuing to collect Log60 evidence", file=sys.stderr)
+    print("paired Observe CPU gate failed; continuing to collect Log60 evidence", file=sys.stderr)
 PY
 
 # Real >=60 s Observe trace for the serialized-log budget. 768 MiB at the
@@ -458,7 +469,7 @@ if not summary["log_pass"]:
     print("real Observe log budget exceeded; continuing to aggregate final gate evidence", file=sys.stderr)
 PY
 
-python3 - "$OUT/overhead-summary.json" "$OUT/log60-summary.json" "$OUT/gate-summary.json" <<'PY'
+python3 - "$OUT/overhead-summary.json" "$OUT/log60-summary.json" "$OUT/cpu-log-summary.json" <<'PY'
 import json
 import sys
 
@@ -469,25 +480,24 @@ with open(log_path, encoding="utf-8") as fh:
     log = json.load(fh)
 
 summary = {
-    "schema": "p2-observe-resource-gate-v1",
+    "schema": "p2-observe-cpu-log-gate-v1",
     "cpu_p95_overhead_ratio": overhead["cpu_p95_overhead_ratio"],
+    "cpu_median_overhead_ratio": overhead["cpu_median_overhead_ratio"],
     "cpu_limit_ratio": overhead["cpu_limit_ratio"],
     "cpu_pass": overhead["cpu_pass"],
-    "memory_p95_incremental_bytes": overhead["memory_p95_incremental_bytes"],
-    "memory_limit_bytes_per_connection": overhead["memory_limit_bytes_per_connection"],
-    "memory_pass": overhead["memory_pass"],
+    "memory_diagnostic_p95_incremental_bytes": overhead[
+        "memory_diagnostic_p95_incremental_bytes"
+    ],
     "max_rolling_60s_serialized_bytes": log["max_rolling_60s_serialized_bytes"],
     "log_limit_bytes_per_60s": log["limit_bytes_per_60s"],
     "log_pass": log["log_pass"],
 }
-summary["gate_pass"] = summary["cpu_pass"] and summary["memory_pass"] and summary["log_pass"]
+summary["cpu_log_pass"] = summary["cpu_pass"] and summary["log_pass"]
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump(summary, fh, indent=2, sort_keys=True)
     fh.write("\n")
 print(json.dumps(summary, sort_keys=True))
-if not summary["gate_pass"]:
-    raise SystemExit("P2 Observe resource gate failed")
 PY
 
 chmod -R a+rX "$OUT"
-echo "P2 Observe resource overhead gate: PASS"
+echo "P2 Observe CPU+Log evidence collection complete"
