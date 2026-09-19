@@ -236,7 +236,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  use super::pacer::Pacer;
  use super::Acked;
  use super::Lost;
-@@ -348,7 +349,11 @@ impl GRecovery {
+@@ -348,6 +349,10 @@ impl GRecovery {
          self.pacer.ack_rate().unwrap_or(Bandwidth::zero())
      }
  
