@@ -23,6 +23,7 @@ SERVER_BIN="${BABR_P2_SERVER_BIN:-$HOST/target/debug/examples/async_http3_server
 CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 FLOW_BYTES="${BABR_P2_FLOW_BYTES:-67108864}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
+DATA_DIRECTION="${BABR_DATA_DIRECTION:-receiver_to_sender}"
 OUT="${BABR_P2_OBSERVE_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-observe-network-artifacts}"
 
 for bin in "$SERVER_BIN" "$CLIENT_BIN"; do
@@ -71,7 +72,7 @@ run_mode() {
   mkdir -p "$response_dir"
 
   bash "$HERE/setup.sh" >/dev/null
-  bash "$HERE/shape.sh" >/dev/null
+  BABR_DATA_DIRECTION="$DATA_DIRECTION" bash "$HERE/shape.sh" >/dev/null
 
   {
     echo "mode=$mode"
@@ -83,6 +84,7 @@ run_mode() {
     echo "rate_mbit=${BABR_RATE_MBIT:-100}"
     echo "one_way_delay_ms=${BABR_ONE_WAY_DELAY_MS:-20}"
     echo "loss_pct=${BABR_LOSS_PCT:-0}"
+    echo "data_direction=$DATA_DIRECTION"
   } > "$mode_dir/run-metadata.txt"
 
   local -a server_env=("RUST_LOG=info")
@@ -90,8 +92,7 @@ run_mode() {
     server_env+=("BABR_OBSERVE_TELEMETRY_FILE=$trace")
   fi
 
-  /usr/bin/time -v -o "$mode_dir/server-time.txt" \
-    ip netns exec "$NS_D" env "${server_env[@]}" \
+  ip netns exec "$NS_D" env "${server_env[@]}" \
     "$SERVER_BIN" \
       --address "$D_IP:$PORT" \
       --cc-algorithm bbr2 \
@@ -100,6 +101,9 @@ run_mode() {
   SERVER_PID=$!
 
   wait_for_server
+
+  local transfer_start_ns transfer_end_ns
+  transfer_start_ns="$(date +%s%N)"
 
   /usr/bin/time -v -o "$mode_dir/client-time.txt" \
     ip netns exec "$NS_S" env RUST_LOG=info \
@@ -116,6 +120,39 @@ run_mode() {
       --dump-responses "$response_dir" \
     > "$mode_dir/client.log" 2>&1
 
+  transfer_end_ns="$(date +%s%N)"
+  python3 - "$transfer_start_ns" "$transfer_end_ns" "$FLOW_BYTES"     "${BABR_RATE_MBIT:-100}" "$mode_dir/transfer-summary.json" <<'PY'
+import json
+import sys
+
+start_ns = int(sys.argv[1])
+end_ns = int(sys.argv[2])
+flow_bytes = int(sys.argv[3])
+rate_mbit = float(sys.argv[4])
+out = sys.argv[5]
+
+elapsed = (end_ns - start_ns) / 1_000_000_000
+goodput_mbit = flow_bytes * 8 / elapsed / 1_000_000
+# If this 64MiB response really crosses the configured TBF, elapsed time cannot
+# be faster than the configured rate plus the same 15% calibration tolerance.
+min_elapsed = flow_bytes * 8 / (rate_mbit * 1.15 * 1_000_000)
+
+summary = {
+    "elapsed_seconds": elapsed,
+    "flow_bytes": flow_bytes,
+    "application_goodput_mbit": goodput_mbit,
+    "configured_rate_mbit": rate_mbit,
+    "minimum_elapsed_for_115pct_rate_seconds": min_elapsed,
+    "bottleneck_timing_pass": elapsed >= min_elapsed,
+}
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump(summary, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+print(json.dumps(summary, sort_keys=True))
+if not summary["bottleneck_timing_pass"]:
+    raise SystemExit("bulk response bypassed or exceeded configured TBF tolerance")
+PY
+
   # Give the server one ACK interval to process the tail before terminating
   # the long-running listener.
   sleep 0.5
@@ -124,8 +161,31 @@ run_mode() {
   SERVER_PID=""
 
   ip netns exec "$NS_S" tc -s qdisc show dev "$S_IF"     > "$mode_dir/qdisc-sender.txt"
-  ip netns exec "$NS_R" tc -s qdisc show dev "$R_D_IF"     > "$mode_dir/qdisc-router.txt"
+  ip netns exec "$NS_R" tc -s qdisc show dev "$R_S_IF"     > "$mode_dir/qdisc-router-to-sender.txt"
+  ip netns exec "$NS_R" tc -s qdisc show dev "$R_D_IF"     > "$mode_dir/qdisc-router-to-receiver.txt"
   ip netns exec "$NS_D" tc -s qdisc show dev "$D_IF"     > "$mode_dir/qdisc-receiver.txt"
+
+  local bottleneck_qdisc
+  case "$DATA_DIRECTION" in
+    receiver_to_sender)
+      bottleneck_qdisc="$mode_dir/qdisc-router-to-sender.txt"
+      ;;
+    sender_to_receiver)
+      bottleneck_qdisc="$mode_dir/qdisc-router-to-receiver.txt"
+      ;;
+    *)
+      echo "Unsupported data direction during qdisc verification" >&2
+      exit 101
+      ;;
+  esac
+
+  grep -q "qdisc tbf" "$bottleneck_qdisc"
+  local tbf_sent_bytes
+  tbf_sent_bytes="$(awk '/ Sent / {print $2; exit}' "$bottleneck_qdisc")"
+  if [[ -z "$tbf_sent_bytes" || "$tbf_sent_bytes" -lt "$FLOW_BYTES" ]]; then
+    echo "$mode TBF did not carry the bulk response: sent=$tbf_sent_bytes flow=$FLOW_BYTES" >&2
+    exit 102
+  fi
 
   local response="$response_dir/$FLOW_BYTES"
   if [[ ! -f "$response" ]]; then
