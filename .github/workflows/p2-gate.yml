@@ -73,6 +73,7 @@ jobs:
             quiche/src/recovery/mod.rs \
             quiche/src/lib.rs \
             tokio-quiche/src/quic/io/worker.rs \
+            tokio-quiche/src/http3/driver/mod.rs \
             > /tmp/p2-observe-host.diff
           ! grep -E '^[+].*(final_pacing|set_pacing|limit_cwnd\(|can_send\(|max_pacing_rate =|burst_tokens =)' /tmp/p2-observe-host.diff
 
