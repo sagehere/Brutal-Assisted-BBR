@@ -9,7 +9,7 @@
 
 只使用阶段 01 锁定的宿主、基线、参数和状态表。Lite 的目标候选为 T，随后仍须通过辅助增长、预算与宿主安全约束。保持基线 CWND 处理，不引入 `T/A`、独立窗口扩大、Adaptive Target、多路径或新的竞争检测。
 
-> 实施记录：2026-09-19 已建立 `p2-observe-lite`，开始 M0/M1；当前仅允许无发包影响的 Observe 参考模型与宿主接线工作。Observe Gate 通过前不得启用 Lite 实际辅助发送。详见 [P2 实施记录与验收](P2-实施记录与验收.md)。
+> 实施记录：2026-09-19 已建立 `p2-observe-lite`。M0/M1 已完成，真实 Off/Observe 网络长流已通过；当前 M2 仍因资源开销 Gate 未通过而锁定 Lite。Observe Gate 通过前不得启用 Lite 实际辅助发送。L03/L04/L05/L10 的实际辅助网络证据属于 Lite 实现后的 M4 Controlled Safety，不作为解锁 Lite 的循环前置。详见 [P2 实施记录与验收](P2-实施记录与验收.md)。
 
 ## 2. 开发任务
 
