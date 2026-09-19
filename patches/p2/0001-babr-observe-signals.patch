@@ -1,14 +1,13 @@
 diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
-
 --- a/quiche/src/recovery/gcongestion/bbr2.rs
 +++ b/quiche/src/recovery/gcongestion/bbr2.rs
-@@ -35,6 +35,7 @@ use crate::recovery::RecoveryStats;
+@@ -35,4 +35,5 @@ use crate::recovery::RecoveryStats;
  
 +use self::mode::CyclePhase;
  use self::mode::Mode;
  use self::mode::ModeImpl;
  
-@@ -47,6 +48,70 @@ use super::RttStats;
+@@ -47,5 +48,64 @@ use super::RttStats;
  
  const MAX_MODE_CHANGES_PER_CONGESTION_EVENT: usize = 4;
  
@@ -97,7 +96,7 @@ diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcong
              mss: max_segment_size,
              params,
          }
-@@ -538,6 +613,51 @@ impl BBRv2 {
+@@ -538,6 +613,45 @@ impl BBRv2 {
          self.params.time_sent_set_to_now
      }
  
@@ -143,7 +142,7 @@ diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcong
      fn on_exit_quiescence(&mut self, now: Instant) {
          if let Some(last_quiescence_start) = self.last_quiescence_start.take() {
              self.mode.do_on_exit_quiescence(
-@@ -738,6 +858,13 @@ impl CongestionControl for BBRv2 {
+@@ -738,6 +858,14 @@ impl CongestionControl for BBRv2 {
          if !self.last_sample_is_app_limited {
              self.has_non_app_limited_sample = true;
          }
@@ -158,7 +157,7 @@ diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcong
          if congestion_event.bytes_in_flight == 0 &&
              self.params.avoid_unnecessary_probe_rtt
          {
-@@ -846,4 +973,43 @@ mod tests {
+@@ -846,4 +973,45 @@ mod tests {
              (2.88499 * pacing_cwnd as f64) as u64
          );
      }
@@ -205,7 +204,6 @@ diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcong
 +    }
  }
 diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
-
 --- a/quiche/src/recovery/gcongestion/pacer.rs
 +++ b/quiche/src/recovery/gcongestion/pacer.rs
 @@ -29,6 +29,7 @@
@@ -228,10 +226,9 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
          &mut self, sent_time: Instant, bytes_in_flight: usize,
          packet_number: u64, bytes: usize, is_retransmissible: bool,
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
-
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -54,7 +54,8 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
+@@ -54,5 +54,6 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
  
 -use super::bbr2::BBRv2;
 +use super::bbr2::BabrObserveSnapshot;
@@ -239,7 +236,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  use super::pacer::Pacer;
  use super::Acked;
  use super::Lost;
-@@ -348,6 +349,10 @@ impl GRecovery {
+@@ -348,7 +349,11 @@ impl GRecovery {
          self.pacer.ack_rate().unwrap_or(Bandwidth::zero())
      }
  
