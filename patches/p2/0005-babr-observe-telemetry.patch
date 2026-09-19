@@ -20,7 +20,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/reco
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,581 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -154,8 +154,21 @@ new file mode 100644
 +    pub(crate) fn set_enabled(
 +        &mut self, enabled: bool, guard_baseline: BabrTransportGuardCounters,
 +    ) {
-+        if enabled && !self.enabled {
-+            self.records.clear();
++        if !enabled {
++            self.enabled = false;
++            // Release heap capacity so a migrated/disabled path cannot retain
++            // a second 4096-entry allocation against the per-connection budget.
++            self.records = VecDeque::new();
++            self.next_seq = 0;
++            self.dropped_records = 0;
++            self.epoch = None;
++            self.serialized_window_started = None;
++            self.serialized_bytes_in_window = 0;
++            return;
++        }
++
++        if !self.enabled {
++            self.records = VecDeque::new();
 +            self.next_seq = 0;
 +            self.dropped_records = 0;
 +            self.epoch = None;
@@ -164,7 +177,7 @@ new file mode 100644
 +            self.serialized_bytes_in_window = 0;
 +        }
 +
-+        self.enabled = enabled;
++        self.enabled = true;
 +    }
 +
 +    fn guard_reason(
@@ -531,6 +544,25 @@ new file mode 100644
 +    }
 +
 +    #[test]
++    fn disabling_releases_ring_storage_and_records() {
++        let now = Instant::now();
++        let guards = BabrTransportGuardCounters::default();
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, guards);
++        telemetry.record_if_interesting(
++            now,
++            snapshot(BabrBbrPhase::ProbeBwCruise, guards),
++        );
++        assert_eq!(telemetry.stats().records, 1);
++
++        telemetry.set_enabled(false, guards);
++        let stats = telemetry.stats();
++        assert!(!stats.enabled);
++        assert_eq!(stats.records, 0);
++        assert_eq!(telemetry.records.capacity(), 0);
++    }
++
++    #[test]
 +    fn guard_event_is_recorded_without_waiting_for_round_end() {
 +        let now = Instant::now();
 +        let baseline = BabrTransportGuardCounters::default();
@@ -731,7 +763,7 @@ diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
 diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 --- a/quiche/src/lib.rs
 +++ b/quiche/src/lib.rs
-@@ -7058,4 +7058,40 @@ impl<F: BufFactory> Connection<F> {
+@@ -7058,4 +7058,49 @@ impl<F: BufFactory> Connection<F> {
          Ok(())
      }
  
@@ -744,6 +776,15 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +            .paths
 +            .path_id_from_addrs(&(from, to))
 +            .ok_or(Error::InvalidState)?;
++
++        if enabled {
++            // The frozen budget is per connection, not per path. Release any
++            // prior path ring before enabling the selected real path.
++            for (_, path) in self.paths.iter_mut() {
++                path.recovery
++                    .babr_set_observe_telemetry_enabled(false);
++            }
++        }
 +
 +        self.paths
 +            .get_mut(path_id)?
