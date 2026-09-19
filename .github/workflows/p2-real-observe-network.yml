@@ -56,6 +56,7 @@ jobs:
           BABR_RATE_MBIT: "100"
           BABR_ONE_WAY_DELAY_MS: "20"
           BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
           BABR_P2_FLOW_BYTES: "67108864"
           BABR_P2_OBSERVE_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-network-artifacts
         run: |
