@@ -5,10 +5,12 @@ on:
     paths:
       - "patches/p2/**"
       - "tools/p2/netns/**"
-      - ".github/workflows/p2-observe-overhead.yml"
-      - "阶段任务书/P2-Observe资源开销验证.md"
-      - "阶段任务书/P2-实施记录与验收.md"
+      - "tools/p2/preflight.sh"
+      - "tools/p2/apply-host-patches.sh"
       - "阶段任务书/P1-冻结参数与用例.json"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-observe-overhead.yml"
   workflow_dispatch:
 
 jobs:
@@ -22,6 +24,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88
