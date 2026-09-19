@@ -1,0 +1,124 @@
+diff --git a/quiche/src/ranges.rs b/quiche/src/ranges.rs
+--- a/quiche/src/ranges.rs
++++ b/quiche/src/ranges.rs
+@@ -120,4 +120,43 @@ impl RangeSet {
+         self.fixup();
+     }
+ 
++    /// Returns how many bytes in `item` are already covered by this set.
++    ///
++    /// BABR Observe uses this to count only newly acknowledged STREAM payload
++    /// without rescanning the complete ACK history on every ACK. Inline sets
++    /// are tiny; BTree sets use one predecessor lookup plus only ranges whose
++    /// starts fall inside the queried interval.
++    pub(crate) fn babr_covered_bytes(&self, item: Range<u64>) -> u64 {
++        let start = item.start;
++        let end = item.end;
++        if start >= end {
++            return 0;
++        }
++
++        match self {
++            RangeSet::Inline(set) => {
++                let mut covered = 0_u64;
++                for &(s, e) in &set.inner {
++                    if s >= end {
++                        break;
++                    }
++                    let lo = cmp::max(s, start);
++                    let hi = cmp::min(e, end);
++                    if hi > lo {
++                        covered = covered.saturating_add(hi - lo);
++                    }
++                }
++                covered
++            },
++
++            RangeSet::BTree(set) => {
++                let mut covered = 0_u64;
++                if let Some((&s, &e)) = set.inner.range(..start).next_back() {
++                    let hi = cmp::min(e, end);
++                    if hi > start {
++                        covered = covered.saturating_add(hi - start);
++                    }
++                    debug_assert!(s < start);
++                }
++
++                for (&s, &e) in set.inner.range(start..end) {
++                    let hi = cmp::min(e, end);
++                    if hi > s {
++                        covered = covered.saturating_add(hi - s);
++                    }
++                }
++                covered
++            },
++        }
++    }
++
+     /// Iterate over the stored ranges in incremental order.
+     pub fn iter(
+diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
+--- a/quiche/src/stream/send_buf.rs
++++ b/quiche/src/stream/send_buf.rs
+@@ -550,12 +550,12 @@ impl<F: BufFactory> SendBuf<F> {
+         }
+     }
+ 
+-    /// Total uniquely acknowledged STREAM payload represented by the
+-    /// transport's existing ACK RangeSet.
+-    pub(crate) fn babr_acked_payload_bytes(&self) -> u64 {
+-        self.acked
+-            .iter()
+-            .fold(0_u64, |n, r| n.saturating_add(r.end - r.start))
++    /// Bytes in this ACK range that have not already been acknowledged.
++    pub(crate) fn babr_newly_acked_payload_bytes(
++        &self, off: u64, len: usize,
++    ) -> u64 {
++        let end = off + len as u64;
++        (end - off).saturating_sub(self.acked.babr_covered_bytes(off..end))
+     }
+ 
+     /// Returns the outgoing flow control capacity.
+@@ -589,4 +589,18 @@ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn babr_newly_acked_payload_counts_only_uncovered_bytes() {
++        let mut send = <SendBuf>::new(u64::MAX);
++
++        assert_eq!(send.babr_newly_acked_payload_bytes(0, 100), 100);
++        send.ack(0, 100);
++        assert_eq!(send.babr_newly_acked_payload_bytes(0, 100), 0);
++        assert_eq!(send.babr_newly_acked_payload_bytes(50, 100), 50);
++
++        send.ack(50, 100);
++        assert_eq!(send.babr_newly_acked_payload_bytes(25, 100), 0);
++        assert_eq!(send.babr_newly_acked_payload_bytes(150, 50), 50);
++    }
++
+     #[test]
+     fn empty_write() {
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -3698,13 +3698,11 @@ impl<F: BufFactory> Connection<F> {
+                             None => continue,
+                         };
+ 
+-                        let unique_before = babr_account_unique
+-                            .then(|| stream.send.babr_acked_payload_bytes());
++                        let unique_delta = if babr_account_unique {
++                            stream.send.babr_newly_acked_payload_bytes(
++                                offset, length,
++                            )
++                        } else {
++                            0
++                        };
+                         let dropped = stream.send.ack_and_drop(offset, length);
+-                        let unique_delta = unique_before.map_or(0, |before| {
+-                            stream
+-                                .send
+-                                .babr_acked_payload_bytes()
+-                                .saturating_sub(before)
+-                        });
+                         let priority_key = Arc::clone(&stream.priority_key);
