@@ -1,6 +1,6 @@
-diff --git a/quiche/src/recovery/gcongestion/bbr2/mod.rs b/quiche/src/recovery/gcongestion/bbr2/mod.rs
---- a/quiche/src/recovery/gcongestion/bbr2/mod.rs
-+++ b/quiche/src/recovery/gcongestion/bbr2/mod.rs
+diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
+--- a/quiche/src/recovery/gcongestion/bbr2.rs
++++ b/quiche/src/recovery/gcongestion/bbr2.rs
 @@ -613,4 +613,8 @@ impl BBRv2 {
          self.params.time_sent_set_to_now
      }
@@ -25,15 +25,14 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -349,4 +349,8 @@ impl GRecovery {
-         self.pacer.ack_rate().unwrap_or(Bandwidth::zero())
-     }
- 
+@@ -353,3 +353,7 @@ impl GRecovery {
 +    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
 +        self.pacer.babr_observe_end_of_round_trip()
 +    }
 +
-     pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+     pub(crate) fn babr_observe_snapshot(&self) -> BabrRecoveryObserveSnapshot {
+         let bbr = self.pacer.babr_observe_snapshot();
+         let accounting = BabrObserveAccounting {
 diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/recovery/gcongestion/babr_telemetry.rs
 --- a/quiche/src/recovery/gcongestion/babr_telemetry.rs
 +++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
