@@ -56,8 +56,10 @@ def decide(event, state):
         return baseline_only("non_network_or_path_event")
     if event.get("phase") not in p["allowed_bbr_phase"]:
         return baseline_only("baseline_phase_protected")
-    if event.get("recovery") or event.get("persistent_congestion") or event.get("pto") or event.get("ecn_ce"):
-        return baseline_only("host_congestion_protection", True)
+    if event.get("loss_detected") or event.get("pto"):
+        return baseline_only("transport_guard", True)
+    if event.get("persistent_congestion") or event.get("ecn_ce"):
+        return baseline_only("future_host_guard", True)
     if now < state["backoff_until_ms"]:
         return baseline_only("backoff_active")
     if event.get("sample_age_rounds", 0) > guards["sample_max_age_rounds"] or baseline <= 0:
@@ -105,11 +107,12 @@ def run():
     check("C01 unreachable target exits without RTT growth", lambda: _unreachable())
     check("C02 huge target respects relative gain", lambda: _huge_target())
     check("C03 W=0 keeps baseline cwnd", lambda: _baseline_return())
-    check("C04 protected phases and recovery withdraw", lambda: _protected())
+    check("C04 protected phases and transport guards withdraw", lambda: _protected())
     check("C05 timeout, byte budget, and queued overshoot", lambda: _limits())
     check("C06 configuration and path changes do not bypass backoff", lambda: _changes())
     check("C07 invalid efficiency inputs do not accelerate", lambda: _invalid_inputs())
     check("C08 valid baseline learning remains available", lambda: _learning())
+    check("C09 frozen host capability contract", lambda: _capabilities())
 
 
 def _unreachable():
@@ -132,7 +135,8 @@ def _baseline_return():
 def _protected():
     for phase in ("Startup", "Drain", "ProbeRTT", "ProbeBW.Down"):
         assert decide(base_event(phase=phase), {})["state"] == "BASELINE"
-    assert decide(base_event(recovery=True), {})["state"] == "BACKOFF"
+    assert decide(base_event(loss_detected=True), {})["state"] == "BACKOFF"
+    assert decide(base_event(pto=True), {})["state"] == "BACKOFF"
 
 
 def _limits():
@@ -156,6 +160,15 @@ def _invalid_inputs():
 def _learning():
     result = decide(base_event(model_delivery_rate=30_000_000), {"rounds": 2, "reference_rate": 20_000_000})
     assert result["state"] == "ASSIST" and result["cwnd"] == 12_000
+
+
+def _capabilities():
+    assert CFG["schema_version"] == "p1-baseline-v2"
+    assert CFG["capabilities"]["bbr_is_in_recovery"] == "not_used"
+    assert CFG["capabilities"]["persistent_congestion_signal"].startswith("unsupported")
+    assert CFG["capabilities"]["ecn_ce_signal"].startswith("unsupported")
+    assert "pre-debit" in CFG["assist"]["budget_accounting"]
+    assert "socket/GSO" in CFG["telemetry"]["actual_sent_accounting"]
 
 
 if __name__ == "__main__":
