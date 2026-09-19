@@ -1,10 +1,10 @@
 # P1 恢复与 I/O 事件桥接设计
 
-版本：`p1-baseline-v2`；日期：2026-09-19；状态：P1 冻结设计。
+版本：`p1-baseline-v3`；日期：2026-09-19；状态：Final Closure 宿主映射。
 
 ## 1. 目的
 
-本文件闭环 P1 对 `BBRv2::is_in_recovery()`、PTO、持续拥塞、ECN 和 socket 实际发送边界的未决项。设计仅定义阶段 02 的最小接入契约，不在 P1 实现 BABR 控制器。
+本文件只负责把 `p1-baseline-v3` 的规范语义映射到固定宿主接口，不得覆盖或创造主规格规则。它闭环 `BBRv2::is_in_recovery()`、PTO、持续拥塞、ECN 和 socket 实际发送边界，但不在 P1 实现 BABR 控制器。
 
 固定宿主仍为 Cloudflare quiche 0.29.3，提交 `55886df3be579579207104c8e645825b6347a209`。源码审计确认：
 
@@ -28,8 +28,11 @@ TransportGuardEvent {
     AppLimited
     ReceiverLimited
     PolicyLimited
-    EcnCe              # quiche 0.29.3: Unsupported
-    PersistentCongestion # quiche 0.29.3: Unsupported
+}
+
+HostCapability {
+    EcnCe = Unsupported
+    PersistentCongestion = Unsupported
 }
 ```
 
@@ -103,10 +106,10 @@ actual_socket_sent_bytes
 
 为了避免 WouldBlock、GSO、异步队列或应用层重试绕过预算：
 
-- 在调用 `send()/send_on_path()` 生成带辅助增量的新 datagram **之前**检查剩余额度。
+- admission 粒度固定为**单个 QUIC datagram**；在调用 `send()/send_on_path()` 生成带辅助增量的新 datagram **之前**检查剩余额度与 hard deadline。
 - datagram 一旦由 quiche 成功生成，就按生成字节数保守扣减 `assist_budget_debit_bytes`。
 - socket 失败、WouldBlock、部分写入均**不退款**。
-- 达到预算、截止时间或 2,400 byte 不可撤销队列容差后，后续 datagram 不得携带辅助增量；基线发送仍可继续。
+- `now >= assist_deadline`、预算不足以覆盖下一 datagram 或达到 2,400 byte 不可撤销队列容差后，后续 datagram 不得携带辅助增量；deadline 对新 Assist 字节的 grace 为 0ms，基线发送仍可继续。
 - 这个计数器是安全执行预算，不宣称等于“相对未启用 Assist 的额外网络字节”。
 
 该规则保证预算安全不依赖 socket 回调。
