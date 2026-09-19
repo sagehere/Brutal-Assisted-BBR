@@ -5,9 +5,9 @@ on:
     paths:
       - "tools/p2/**"
       - "patches/p2/**"
-      - "阶段任务书/P2-**"
-      - "阶段任务书/02-观测模式与BABR-Lite原型任务书.md"
       - "阶段任务书/P1-冻结参数与用例.json"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
       - ".github/workflows/p2-gate.yml"
   workflow_dispatch:
 
@@ -21,6 +21,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
 
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88
