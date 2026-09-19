@@ -1,0 +1,92 @@
+name: P2 Observe Overhead Gate
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/netns/**"
+      - ".github/workflows/p2-observe-overhead.yml"
+      - "阶段任务书/P2-Observe资源开销验证.md"
+      - "阶段任务书/P2-实施记录与验收.md"
+      - "阶段任务书/P1-冻结参数与用例.json"
+  workflow_dispatch:
+
+jobs:
+  overhead:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native and network dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake clang pkg-config perl nasm \
+            iproute2 iputils-ping
+
+      - name: Apply frozen-host Observe patches
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Build release tokio-quiche sender
+        run: |
+          cargo build \
+            --release \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p tokio-quiche \
+            --example async_http3_server \
+            --features gcongestion
+
+      - name: Build release quiche receiver
+        run: |
+          cargo build \
+            --release \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p quiche_apps \
+            --bin quiche-client
+
+      - name: Run repeated real Observe resource gate
+        env:
+          BABR_RATE_MBIT: "100"
+          BABR_ONE_WAY_DELAY_MS: "20"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_OVERHEAD_PAIRS: "20"
+          BABR_P2_OVERHEAD_WARMUP_BYTES: "67108864"
+          BABR_P2_OVERHEAD_FLOW_BYTES: "134217728"
+          BABR_P2_LOG_FLOW_BYTES: "805306368"
+          BABR_P2_OVERHEAD_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-overhead-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-overhead.sh
+
+      - name: Show resource-gate summary
+        if: always()
+        run: |
+          for f in \
+            阶段任务书/p2-observe-overhead-artifacts/overhead-summary.json \
+            阶段任务书/p2-observe-overhead-artifacts/log60-summary.json \
+            阶段任务书/p2-observe-overhead-artifacts/gate-summary.json
+          do
+            if [[ -f "$f" ]]; then
+              echo "===== $f ====="
+              cat "$f"
+            fi
+          done
+
+      - name: Upload Observe overhead evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-observe-overhead-${{ github.sha }}
+          path: 阶段任务书/p2-observe-overhead-artifacts
+          if-no-files-found: error
