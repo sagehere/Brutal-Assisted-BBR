@@ -821,7 +821,7 @@ diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
 diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 --- a/quiche/src/lib.rs
 +++ b/quiche/src/lib.rs
-@@ -7058,4 +7058,49 @@ impl<F: BufFactory> Connection<F> {
+@@ -7058,4 +7058,53 @@ impl<F: BufFactory> Connection<F> {
          Ok(())
      }
  
