@@ -59,7 +59,7 @@ fi
 
 ip netns exec "$NS_D" iperf3 -s -1 -D   --logfile "$ARTIFACT_DIR/iperf-server.log"
 sleep 0.5
-ip netns exec "$NS_S" iperf3 -c "$D_IP" -t 6 -O 1 -J   > "$ARTIFACT_DIR/iperf-client.json"
+ip netns exec "$NS_S" iperf3 -c "$D_IP" -P 4 -t 8 -O 1 -J > "$ARTIFACT_DIR/iperf-client.json"
 
 THROUGHPUT_MBIT="$(python3 - "$ARTIFACT_DIR/iperf-client.json" <<'PY'
 import json
