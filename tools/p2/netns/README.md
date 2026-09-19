@@ -43,3 +43,15 @@ It does **not** count as BABR Observe or Lite network evidence by itself.
 
 Artifacts are written to `阶段任务书/p2-network-artifacts/` and are uploaded by
 the dedicated CI workflow.
+
+
+## Data direction
+
+`shape.sh` is direction-aware:
+
+- `BABR_DATA_DIRECTION=sender_to_receiver` — default, used by network calibration.
+- `BABR_DATA_DIRECTION=receiver_to_sender` — used by the HTTP/3 bulk-response Observe experiment because the tokio-quiche server is the congestion-controlled data sender.
+
+The router TBF is always installed on the egress toward the bulk-data receiver. The data sender egress carries netem delay/loss, while the reverse ACK/request path carries the symmetric propagation delay.
+
+`run-observe-pair.sh` additionally rejects a run unless the selected TBF carries at least the application bulk payload and the transfer duration is compatible with the configured rate plus the frozen 15% calibration tolerance.
