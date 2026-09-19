@@ -144,13 +144,25 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 diff --git a/tokio-quiche/src/quic/io/worker.rs b/tokio-quiche/src/quic/io/worker.rs
 --- a/tokio-quiche/src/quic/io/worker.rs
 +++ b/tokio-quiche/src/quic/io/worker.rs
-@@ -259,1 +259,1 @@
+@@ -260,7 +260,7 @@
+                     let mut flush_operation_token =
+                         TrackMidHandshakeFlush::new(self.metrics.clone());
+ 
 -                    self.flush_buffer_to_socket(ctx.buffer()).await;
 +                    self.flush_buffer_to_socket(qconn, ctx.buffer()).await;
-@@ -315,1 +315,1 @@
+ 
+                     flush_operation_token.mark_complete();
+ 
+@@ -330,7 +330,7 @@
+                 directive = self.wait_for_data_or_handshake(qconn, application) => {
+                     match directive? {
+                         WaitForDataOrHandshakeDirective::Flush => {
 -                            self.flush_buffer_to_socket(application.buffer()).await;
 +                            self.flush_buffer_to_socket(qconn, application.buffer()).await;
-@@ -575,8 +575,11 @@
+                         }
+                         WaitForDataOrHandshakeDirective::Noop => {}
+                     }
+@@ -630,8 +630,11 @@
 -    async fn flush_buffer_to_socket(&mut self, send_buf: &[u8]) {
 +    async fn flush_buffer_to_socket(
 +        &mut self, qconn: &mut QuicheConnection, send_buf: &[u8],
@@ -164,11 +176,13 @@ diff --git a/tokio-quiche/src/quic/io/worker.rs b/tokio-quiche/src/quic/io/worke
  
              let to = to.unwrap_or(self.cfg.peer_addr);
              let from = from.filter(|_| self.cfg.with_pktinfo);
-@@ -610,9 +613,16 @@
--            match send_res {
+@@ -660,13 +663,20 @@
+             #[cfg(feature = "perf-quic-listener-metrics")]
+             self.measure_complete_handshake_time();
+ 
+             match send_res {
 -                Ok(n) =>
 -                    if n < self.write_state.bytes_written {
-+            match send_res {
 +                Ok(n) => {
 +                    if let Some((path_from, path_to)) = selected_path {
 +                        // Observe counts exactly the successful socket/GSO
@@ -185,6 +199,12 @@ diff --git a/tokio-quiche/src/quic/io/worker.rs b/tokio-quiche/src/quic/io/worke
 +                },
  
                  Err(_) => {
-@@ -876,1 +886,1 @@
+                     self.metrics.write_errors(labels::QuicWriteError::Err).inc();
+@@ -978,6 +988,6 @@
+         // guarantee that it gets sent by doublechecking the
+         // gathered/flushed byte totals and retry if they don't match.
+         let _ = self.gather_data_from_quiche_conn(qconn, ctx.buffer());
 -        self.flush_buffer_to_socket(ctx.buffer()).await;
 +        self.flush_buffer_to_socket(qconn, ctx.buffer()).await;
+ 
+         *ctx.stats.lock().unwrap() = QuicConnectionStats::from_conn(qconn);
