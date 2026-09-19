@@ -1,0 +1,754 @@
+diff --git a/quiche/src/recovery/gcongestion/mod.rs b/quiche/src/recovery/gcongestion/mod.rs
+--- a/quiche/src/recovery/gcongestion/mod.rs
++++ b/quiche/src/recovery/gcongestion/mod.rs
+@@ -28,4 +28,5 @@
+ mod bbr;
+ mod bbr2;
++mod babr_telemetry;
+ pub mod pacer;
+ mod recovery;
+diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
+--- a/quiche/src/recovery/gcongestion/bbr2.rs
++++ b/quiche/src/recovery/gcongestion/bbr2.rs
+@@ -52,4 +52,5 @@
+ /// This is intentionally independent from pacing gain so the BABR whitelist
+ /// cannot infer a BBR phase from a numeric gain.
++#[repr(u8)]
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum BabrBbrPhase {
+diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+new file mode 100644
+--- /dev/null
++++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+@@ -0,0 +1,529 @@
++// Copyright (C) 2024, Cloudflare, Inc.
++// All rights reserved.
++//
++// BABR P2 Observe-only telemetry. This module cannot change transport output.
++
++use std::collections::VecDeque;
++use std::time::Duration;
++use std::time::Instant;
++
++use super::bbr2::BabrBbrPhase;
++use super::recovery::BabrRecoveryObserveSnapshot;
++use super::recovery::BabrTransportGuardCounters;
++
++pub(crate) const BABR_TELEMETRY_RING_ENTRIES: usize = 4096;
++pub(crate) const BABR_TELEMETRY_MAX_SERIALIZED_BYTES_PER_MINUTE: usize =
++    1_048_576;
++pub(crate) const BABR_TELEMETRY_MEMORY_BUDGET_BYTES: usize = 262_144;
++
++const SERIALIZATION_WINDOW: Duration = Duration::from_secs(60);
++const UNAVAILABLE_U64: u64 = u64::MAX;
++
++const FLAG_END_OF_ROUND: u8 = 1 << 0;
++const FLAG_SAMPLE_VALID: u8 = 1 << 1;
++const FLAG_APP_LIMITED: u8 = 1 << 2;
++const FLAG_LOSS_DETECTED: u8 = 1 << 3;
++const FLAG_CWND_SATURATED: u8 = 1 << 4;
++const FLAG_UNIQUE_PAYLOAD_AVAILABLE: u8 = 1 << 5;
++const FLAG_SOCKET_SENT_AVAILABLE: u8 = 1 << 6;
++
++/// Frozen p1-baseline-v3 reason codes.
++///
++/// Controller-only values are retained even though Observe does not emit all
++/// of them yet. This keeps telemetry vocabulary stable across P2.
++#[repr(u8)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrReasonCode {
++    TargetDisabled,
++    InvalidTarget,
++    ModeNotLite,
++    PathChanged,
++    AppLimited,
++    ReceiverLimited,
++    PolicyLimited,
++    BbrPhaseProtected,
++    LossDetected,
++    PtoFired,
++    BackoffActive,
++    SampleInvalid,
++    TargetNear,
++    AssistTimeout,
++    AssistBudgetExhausted,
++    MaxRounds,
++    HardQueueDelay,
++    NoBenefit,
++    SoftFreeze,
++    BoundedProbe,
++}
++
++impl BabrReasonCode {
++    pub(crate) const fn as_str(self) -> &'static str {
++        match self {
++            Self::TargetDisabled => "TARGET_DISABLED",
++            Self::InvalidTarget => "INVALID_TARGET",
++            Self::ModeNotLite => "MODE_NOT_LITE",
++            Self::PathChanged => "PATH_CHANGED",
++            Self::AppLimited => "APP_LIMITED",
++            Self::ReceiverLimited => "RECEIVER_LIMITED",
++            Self::PolicyLimited => "POLICY_LIMITED",
++            Self::BbrPhaseProtected => "BBR_PHASE_PROTECTED",
++            Self::LossDetected => "LOSS_DETECTED",
++            Self::PtoFired => "PTO_FIRED",
++            Self::BackoffActive => "BACKOFF_ACTIVE",
++            Self::SampleInvalid => "SAMPLE_INVALID",
++            Self::TargetNear => "TARGET_NEAR",
++            Self::AssistTimeout => "ASSIST_TIMEOUT",
++            Self::AssistBudgetExhausted => "ASSIST_BUDGET_EXHAUSTED",
++            Self::MaxRounds => "MAX_ROUNDS",
++            Self::HardQueueDelay => "HARD_QUEUE_DELAY",
++            Self::NoBenefit => "NO_BENEFIT",
++            Self::SoftFreeze => "SOFT_FREEZE",
++            Self::BoundedProbe => "BOUNDED_PROBE",
++        }
++    }
++}
++
++/// Compact ring entry.
++///
++/// The frozen memory budget is per connection. Keep the entry at or below
++/// 56 bytes so 4096 entries leave headroom for the VecDeque and telemetry
++/// state inside the 256 KiB budget.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++struct BabrTelemetryRecord {
++    seq: u64,
++    elapsed_micros: u64,
++    baseline_pacing_rate_bytes_per_second: u64,
++    model_delivery_rate_bytes_per_second: u64,
++    unique_payload_delivered_bytes: u64,
++    actual_socket_sent_bytes: u64,
++    baseline_cwnd_bytes: u32,
++    phase: BabrBbrPhase,
++    reason: BabrReasonCode,
++    shadow_reason: BabrReasonCode,
++    flags: u8,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrTelemetryStats {
++    pub(crate) enabled: bool,
++    pub(crate) records: usize,
++    pub(crate) dropped_records: u64,
++    pub(crate) serialized_bytes_in_window: usize,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct BabrObserveTelemetry {
++    enabled: bool,
++    records: VecDeque<BabrTelemetryRecord>,
++    next_seq: u64,
++    dropped_records: u64,
++    epoch: Option<Instant>,
++    last_guards: BabrTransportGuardCounters,
++    serialized_window_started: Option<Instant>,
++    serialized_bytes_in_window: usize,
++}
++
++impl BabrObserveTelemetry {
++    pub(crate) fn enabled(&self) -> bool {
++        self.enabled
++    }
++
++    pub(crate) fn set_enabled(
++        &mut self, enabled: bool, guard_baseline: BabrTransportGuardCounters,
++    ) {
++        if enabled && !self.enabled {
++            self.records.clear();
++            self.next_seq = 0;
++            self.dropped_records = 0;
++            self.epoch = None;
++            self.last_guards = guard_baseline;
++            self.serialized_window_started = None;
++            self.serialized_bytes_in_window = 0;
++        }
++
++        self.enabled = enabled;
++    }
++
++    fn guard_reason(
++        &self, guards: BabrTransportGuardCounters,
++    ) -> Option<BabrReasonCode> {
++        // Preserve the frozen relative priority among currently observable
++        // guard signals. Target/mode checks live in the controller layer.
++        if guards.path_changed_events > self.last_guards.path_changed_events {
++            return Some(BabrReasonCode::PathChanged);
++        }
++        if guards.app_limited_events > self.last_guards.app_limited_events {
++            return Some(BabrReasonCode::AppLimited);
++        }
++        if guards.receiver_limited_events >
++            self.last_guards.receiver_limited_events
++        {
++            return Some(BabrReasonCode::ReceiverLimited);
++        }
++        if guards.policy_limited_events > self.last_guards.policy_limited_events {
++            return Some(BabrReasonCode::PolicyLimited);
++        }
++        if guards.loss_events > self.last_guards.loss_events {
++            return Some(BabrReasonCode::LossDetected);
++        }
++        if guards.pto_events > self.last_guards.pto_events {
++            return Some(BabrReasonCode::PtoFired);
++        }
++
++        None
++    }
++
++    fn shadow_reason(
++        &self, snapshot: BabrRecoveryObserveSnapshot,
++    ) -> BabrReasonCode {
++        if let Some(reason) = self.guard_reason(snapshot.guards) {
++            return reason;
++        }
++        if !snapshot.bbr.phase.assist_allowed() {
++            return BabrReasonCode::BbrPhaseProtected;
++        }
++        if !snapshot.bbr.delivery_sample_valid {
++            return BabrReasonCode::SampleInvalid;
++        }
++        if snapshot.bbr.sample_is_app_limited {
++            return BabrReasonCode::AppLimited;
++        }
++
++        BabrReasonCode::BoundedProbe
++    }
++
++    pub(crate) fn record_if_interesting(
++        &mut self, now: Instant, snapshot: BabrRecoveryObserveSnapshot,
++    ) {
++        if !self.enabled {
++            return;
++        }
++
++        let guard_reason = self.guard_reason(snapshot.guards);
++        if !snapshot.bbr.end_of_round_trip && guard_reason.is_none() {
++            return;
++        }
++
++        let shadow_reason = self.shadow_reason(snapshot);
++        self.last_guards = snapshot.guards;
++
++        let epoch = *self.epoch.get_or_insert(now);
++        let elapsed_micros = now
++            .saturating_duration_since(epoch)
++            .as_micros()
++            .min(u64::MAX as u128) as u64;
++
++        let mut flags = 0_u8;
++        if snapshot.bbr.end_of_round_trip {
++            flags |= FLAG_END_OF_ROUND;
++        }
++        if snapshot.bbr.delivery_sample_valid {
++            flags |= FLAG_SAMPLE_VALID;
++        }
++        if snapshot.bbr.sample_is_app_limited {
++            flags |= FLAG_APP_LIMITED;
++        }
++        if snapshot.bbr.loss_detected {
++            flags |= FLAG_LOSS_DETECTED;
++        }
++
++        let baseline_cwnd_bytes =
++            match u32::try_from(snapshot.bbr.baseline_cwnd_bytes) {
++                Ok(v) => v,
++                Err(_) => {
++                    flags |= FLAG_CWND_SATURATED;
++                    u32::MAX
++                },
++            };
++
++        let unique_payload_delivered_bytes =
++            match snapshot.accounting.unique_payload_delivered_bytes {
++                Some(v) => {
++                    flags |= FLAG_UNIQUE_PAYLOAD_AVAILABLE;
++                    v
++                },
++                None => UNAVAILABLE_U64,
++            };
++
++        let actual_socket_sent_bytes =
++            match snapshot.accounting.actual_socket_sent_bytes {
++                Some(v) => {
++                    flags |= FLAG_SOCKET_SENT_AVAILABLE;
++                    v
++                },
++                None => UNAVAILABLE_U64,
++            };
++
++        self.next_seq = self.next_seq.saturating_add(1);
++        if self.records.len() == BABR_TELEMETRY_RING_ENTRIES {
++            self.records.pop_front();
++            self.dropped_records = self.dropped_records.saturating_add(1);
++        }
++
++        self.records.push_back(BabrTelemetryRecord {
++            seq: self.next_seq,
++            elapsed_micros,
++            baseline_pacing_rate_bytes_per_second: snapshot
++                .bbr
++                .baseline_pacing_rate_bytes_per_second,
++            model_delivery_rate_bytes_per_second: snapshot
++                .accounting
++                .model_delivery_rate_bytes_per_second,
++            unique_payload_delivered_bytes,
++            actual_socket_sent_bytes,
++            baseline_cwnd_bytes,
++            phase: snapshot.bbr.phase,
++            // Observe never applies the candidate to transport output.
++            reason: BabrReasonCode::ModeNotLite,
++            shadow_reason,
++            flags,
++        });
++    }
++
++    fn reset_serialization_window_if_needed(&mut self, now: Instant) {
++        let reset = self
++            .serialized_window_started
++            .map(|start| now.saturating_duration_since(start) >= SERIALIZATION_WINDOW)
++            .unwrap_or(true);
++
++        if reset {
++            self.serialized_window_started = Some(now);
++            self.serialized_bytes_in_window = 0;
++        }
++    }
++
++    fn json_metric(value: u64) -> String {
++        if value == UNAVAILABLE_U64 {
++            "null".to_string()
++        } else {
++            value.to_string()
++        }
++    }
++
++    fn serialize_record(record: BabrTelemetryRecord) -> String {
++        format!(
++            "{{\"schema\":\"p2-observe-v1\",\"seq\":{},\"t_us\":{},\"phase\":\"{}\",\"reason\":\"{}\",\"shadow_reason\":\"{}\",\"baseline_pacing_Bps\":{},\"baseline_cwnd_bytes\":{},\"model_delivery_Bps\":{},\"unique_payload_bytes\":{},\"actual_socket_sent_bytes\":{},\"flags\":{}}}",
++            record.seq,
++            record.elapsed_micros,
++            record.phase.as_str(),
++            record.reason.as_str(),
++            record.shadow_reason.as_str(),
++            record.baseline_pacing_rate_bytes_per_second,
++            record.baseline_cwnd_bytes,
++            record.model_delivery_rate_bytes_per_second,
++            Self::json_metric(record.unique_payload_delivered_bytes),
++            Self::json_metric(record.actual_socket_sent_bytes),
++            record.flags,
++        )
++    }
++
++    /// Drain newline-delimited structured records without exceeding the
++    /// frozen 1 MiB/min serialization budget. Records that do not fit remain
++    /// queued for a later window.
++    pub(crate) fn take_json_lines(&mut self, now: Instant) -> Vec<String> {
++        self.reset_serialization_window_if_needed(now);
++
++        let mut lines = Vec::new();
++        while let Some(record) = self.records.front().copied() {
++            let line = Self::serialize_record(record);
++            let charged = line.len().saturating_add(1);
++
++            if self
++                .serialized_bytes_in_window
++                .saturating_add(charged) >
++                BABR_TELEMETRY_MAX_SERIALIZED_BYTES_PER_MINUTE
++            {
++                break;
++            }
++
++            self.records.pop_front();
++            self.serialized_bytes_in_window = self
++                .serialized_bytes_in_window
++                .saturating_add(charged);
++            lines.push(line);
++        }
++
++        lines
++    }
++
++    pub(crate) fn stats(&self) -> BabrTelemetryStats {
++        BabrTelemetryStats {
++            enabled: self.enabled,
++            records: self.records.len(),
++            dropped_records: self.dropped_records,
++            serialized_bytes_in_window: self.serialized_bytes_in_window,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::mem::size_of;
++
++    use super::*;
++    use crate::recovery::gcongestion::bbr2::BabrObserveSnapshot;
++    use crate::recovery::gcongestion::recovery::BabrObserveAccounting;
++
++    fn snapshot(
++        phase: BabrBbrPhase, guards: BabrTransportGuardCounters,
++    ) -> BabrRecoveryObserveSnapshot {
++        BabrRecoveryObserveSnapshot {
++            bbr: BabrObserveSnapshot {
++                phase,
++                end_of_round_trip: true,
++                baseline_pacing_rate_bytes_per_second: u64::MAX - 1,
++                baseline_cwnd_bytes: 64_000,
++                model_delivery_rate_bytes_per_second: u64::MAX - 2,
++                delivery_sample_valid: true,
++                sample_max_bandwidth_bytes_per_second: Some(20_000_000),
++                sample_min_rtt_micros: Some(50_000),
++                sample_is_app_limited: false,
++                loss_detected: false,
++            },
++            guards,
++            accounting: BabrObserveAccounting {
++                model_delivery_rate_bytes_per_second: u64::MAX - 2,
++                recovery_packet_bytes_sent: 0,
++                transport_acked_bytes: 0,
++                transport_lost_bytes: 0,
++                unique_payload_delivered_bytes: Some(u64::MAX - 3),
++                actual_socket_sent_bytes: Some(u64::MAX - 4),
++            },
++        }
++    }
++
++    #[test]
++    fn reason_codes_match_frozen_contract_strings() {
++        let codes = [
++            BabrReasonCode::TargetDisabled,
++            BabrReasonCode::InvalidTarget,
++            BabrReasonCode::ModeNotLite,
++            BabrReasonCode::PathChanged,
++            BabrReasonCode::AppLimited,
++            BabrReasonCode::ReceiverLimited,
++            BabrReasonCode::PolicyLimited,
++            BabrReasonCode::BbrPhaseProtected,
++            BabrReasonCode::LossDetected,
++            BabrReasonCode::PtoFired,
++            BabrReasonCode::BackoffActive,
++            BabrReasonCode::SampleInvalid,
++            BabrReasonCode::TargetNear,
++            BabrReasonCode::AssistTimeout,
++            BabrReasonCode::AssistBudgetExhausted,
++            BabrReasonCode::MaxRounds,
++            BabrReasonCode::HardQueueDelay,
++            BabrReasonCode::NoBenefit,
++            BabrReasonCode::SoftFreeze,
++            BabrReasonCode::BoundedProbe,
++        ];
++        let strings: Vec<&str> = codes.iter().map(|c| c.as_str()).collect();
++
++        assert_eq!(strings.len(), 20);
++        assert!(strings.contains(&"MODE_NOT_LITE"));
++        assert!(strings.contains(&"LOSS_DETECTED"));
++        assert!(strings.contains(&"ASSIST_BUDGET_EXHAUSTED"));
++        assert!(strings.contains(&"BOUNDED_PROBE"));
++    }
++
++    #[test]
++    fn ring_and_struct_fit_frozen_memory_budget() {
++        assert!(size_of::<BabrTelemetryRecord>() <= 56);
++
++        let payload =
++            size_of::<BabrTelemetryRecord>() * BABR_TELEMETRY_RING_ENTRIES;
++        assert!(
++            payload + size_of::<BabrObserveTelemetry>() <=
++                BABR_TELEMETRY_MEMORY_BUDGET_BYTES
++        );
++    }
++
++    #[test]
++    fn ring_is_hard_bounded_and_counts_drops() {
++        let now = Instant::now();
++        let guards = BabrTransportGuardCounters::default();
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, guards);
++
++        for i in 0..(BABR_TELEMETRY_RING_ENTRIES + 7) {
++            telemetry.record_if_interesting(
++                now + Duration::from_micros(i as u64),
++                snapshot(BabrBbrPhase::ProbeBwCruise, guards),
++            );
++        }
++
++        let stats = telemetry.stats();
++        assert_eq!(stats.records, BABR_TELEMETRY_RING_ENTRIES);
++        assert_eq!(stats.dropped_records, 7);
++    }
++
++    #[test]
++    fn serialization_never_exceeds_frozen_minute_budget() {
++        let now = Instant::now();
++        let guards = BabrTransportGuardCounters::default();
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, guards);
++
++        for i in 0..BABR_TELEMETRY_RING_ENTRIES {
++            telemetry.record_if_interesting(
++                now + Duration::from_micros(i as u64),
++                snapshot(BabrBbrPhase::ProbeBwCruise, guards),
++            );
++        }
++
++        let lines = telemetry.take_json_lines(now);
++        let charged: usize = lines.iter().map(|line| line.len() + 1).sum();
++        assert!(charged <= BABR_TELEMETRY_MAX_SERIALIZED_BYTES_PER_MINUTE);
++        assert_eq!(
++            charged,
++            telemetry.stats().serialized_bytes_in_window
++        );
++
++        let second = telemetry.take_json_lines(now + Duration::from_secs(1));
++        let second_charged: usize =
++            second.iter().map(|line| line.len() + 1).sum();
++        assert!(
++            charged + second_charged <=
++                BABR_TELEMETRY_MAX_SERIALIZED_BYTES_PER_MINUTE
++        );
++    }
++
++    #[test]
++    fn guard_event_is_recorded_without_waiting_for_round_end() {
++        let now = Instant::now();
++        let baseline = BabrTransportGuardCounters::default();
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, baseline);
++
++        let mut guards = baseline;
++        guards.pto_events = 1;
++        guards.last_pto_count = 1;
++
++        let mut s = snapshot(BabrBbrPhase::ProbeBwCruise, guards);
++        s.bbr.end_of_round_trip = false;
++        telemetry.record_if_interesting(now, s);
++
++        assert_eq!(telemetry.stats().records, 1);
++        let lines = telemetry.take_json_lines(now);
++        assert_eq!(lines.len(), 1);
++        assert!(lines[0].contains("\"shadow_reason\":\"PTO_FIRED\""));
++        assert!(lines[0].contains("\"reason\":\"MODE_NOT_LITE\""));
++    }
++
++    #[test]
++    fn unavailable_metrics_are_serialized_as_null() {
++        let now = Instant::now();
++        let guards = BabrTransportGuardCounters::default();
++        let mut s = snapshot(BabrBbrPhase::ProbeBwCruise, guards);
++        s.accounting.unique_payload_delivered_bytes = None;
++        s.accounting.actual_socket_sent_bytes = None;
++
++        let mut telemetry = BabrObserveTelemetry::default();
++        telemetry.set_enabled(true, guards);
++        telemetry.record_if_interesting(now, s);
++
++        let lines = telemetry.take_json_lines(now);
++        assert_eq!(lines.len(), 1);
++        assert!(lines[0].contains("\"unique_payload_bytes\":null"));
++        assert!(lines[0].contains("\"actual_socket_sent_bytes\":null"));
++    }
++}
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -54,3 +54,5 @@
+ use super::bbr2::BabrObserveSnapshot;
+ use super::bbr2::BBRv2;
++use super::babr_telemetry::BabrObserveTelemetry;
++use super::babr_telemetry::BabrTelemetryStats;
+ use super::pacer::Pacer;
+@@ -433,5 +435,6 @@ pub struct GRecovery {
+     babr_guard_counters: BabrTransportGuardCounters,
+     babr_actual_socket_sent_bytes: u64,
+     babr_unique_payload_delivered_bytes: u64,
++    babr_telemetry: BabrObserveTelemetry,
+ 
+     pub bytes_lost: u64,
+@@ -492,4 +495,36 @@ impl GRecovery {
+         }
+     }
+ 
++    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
++        self.babr_telemetry
++            .set_enabled(enabled, self.babr_guard_counters);
++    }
++
++    pub(crate) fn babr_take_observe_telemetry_json_lines(
++        &mut self, now: Instant,
++    ) -> Vec<String> {
++        self.babr_telemetry.take_json_lines(now)
++    }
++
++    pub(crate) fn babr_observe_telemetry_stats(&self) -> BabrTelemetryStats {
++        self.babr_telemetry.stats()
++    }
++
++    fn babr_record_observe_telemetry(&mut self, now: Instant) {
++        if !self.babr_telemetry.enabled() {
++            return;
++        }
++
++        let snapshot = self.babr_observe_snapshot();
++        self.babr_telemetry.record_if_interesting(now, snapshot);
++    }
++
++    fn babr_record_observe_telemetry_now(&mut self) {
++        if !self.babr_telemetry.enabled() {
++            return;
++        }
++
++        self.babr_record_observe_telemetry(Instant::now());
++    }
++
+     /// Records bytes accepted by the socket/GSO send boundary.
+@@ -516,14 +559,17 @@ impl GRecovery {
+         self.babr_guard_counters.record(
+             BabrTransportGuardEvent::PathChanged { path_id },
+         );
++        self.babr_record_observe_telemetry_now();
+     }
+ 
+     pub(crate) fn babr_on_receiver_limited(&mut self) {
+         self.babr_guard_counters
+             .record(BabrTransportGuardEvent::ReceiverLimited);
++        self.babr_record_observe_telemetry_now();
+     }
+ 
+     pub(crate) fn babr_on_policy_limited(&mut self) {
+         self.babr_guard_counters
+             .record(BabrTransportGuardEvent::PolicyLimited);
++        self.babr_record_observe_telemetry_now();
+     }
+@@ -571,4 +617,5 @@ impl GRecovery {
+             babr_guard_counters: Default::default(),
+             babr_actual_socket_sent_bytes: 0,
+             babr_unique_payload_delivered_bytes: 0,
++            babr_telemetry: Default::default(),
+             bytes_lost: 0,
+@@ -873,4 +920,6 @@ impl RecoveryOps for GRecovery {
+             &mut self.recovery_stats,
+         );
+ 
++        self.babr_record_observe_telemetry(now);
++
+         self.pto_count = 0;
+@@ -923,4 +972,6 @@ impl RecoveryOps for GRecovery {
+                 &mut self.recovery_stats,
+             );
+ 
++            self.babr_record_observe_telemetry(now);
++
+             self.lost_count += lost_packets;
+@@ -957,5 +1008,7 @@ impl RecoveryOps for GRecovery {
+                 pto_count: self.pto_count,
+             },
+         );
++        self.babr_record_observe_telemetry(now);
++
+ 
+         let epoch = &mut self.epochs[epoch];
+@@ -1066,4 +1119,5 @@ impl RecoveryOps for GRecovery {
+     fn on_app_limited(&mut self) {
+         self.babr_guard_counters
+             .record(BabrTransportGuardEvent::AppLimited);
++        self.babr_record_observe_telemetry_now();
+         self.pacer.on_app_limited(self.bytes_in_flight.get())
+@@ -1285,5 +1339,27 @@ mod tests {
+         assert_eq!(guards.last_pto_count, 1);
+     }
+ 
++    #[test]
++    fn babr_telemetry_is_disabled_by_default() {
++        let r = new_babr_recovery();
++        let stats = r.babr_observe_telemetry_stats();
++        assert!(!stats.enabled);
++        assert_eq!(stats.records, 0);
++    }
++
++    #[test]
++    fn babr_telemetry_enable_uses_current_guards_as_baseline() {
++        let mut r = new_babr_recovery();
++        r.babr_on_path_changed(9);
++        r.babr_set_observe_telemetry_enabled(true);
++
++        // Enabling after an old event must not replay historical guard state.
++        r.babr_record_observe_telemetry(Instant::now());
++        assert_eq!(r.babr_observe_telemetry_stats().records, 0);
++
++        r.babr_on_policy_limited();
++        assert_eq!(r.babr_observe_telemetry_stats().records, 1);
++    }
++
+     #[test]
+     fn test_high_pto_count_no_panic() {
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -488,4 +488,21 @@ impl Recovery {
+         }
+     }
+ 
++    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_set_observe_telemetry_enabled(enabled);
++        }
++    }
++
++    pub(crate) fn babr_take_observe_telemetry_json_lines(
++        &mut self, now: Instant,
++    ) -> Vec<String> {
++        match self {
++            Recovery::GCongestion(recovery) =>
++                recovery.babr_take_observe_telemetry_json_lines(now),
++
++            Recovery::Legacy(_) => Vec::new(),
++        }
++    }
++
+     #[cfg(feature = "qlog")]
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -7058,4 +7058,40 @@ impl<F: BufFactory> Connection<F> {
+         Ok(())
+     }
+ 
++    /// Enable or disable BABR Observe telemetry for one real path.
++    #[doc(hidden)]
++    pub fn babr_set_observe_telemetry_enabled(
++        &mut self, from: SocketAddr, to: SocketAddr, enabled: bool,
++    ) -> Result<()> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_set_observe_telemetry_enabled(enabled);
++        Ok(())
++    }
++
++    /// Drain BABR Observe telemetry as newline-delimited JSON records.
++    ///
++    /// The recovery-side serializer enforces the frozen 1 MiB/min budget.
++    #[doc(hidden)]
++    pub fn babr_take_observe_telemetry_json_lines(
++        &mut self, from: SocketAddr, to: SocketAddr,
++    ) -> Result<Vec<String>> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        Ok(self
++            .paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_take_observe_telemetry_json_lines(Instant::now()))
++    }
++
+     /// Closes the connection with the given error and reason.
