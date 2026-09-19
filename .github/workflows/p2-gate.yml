@@ -52,7 +52,7 @@ jobs:
             --lib \
             --features gcongestion \
             babr_off_observe_host_outputs_identical_with_telemetry_toggle \
-            -- --exact --nocapture
+            -- --nocapture
 
       - name: Build and test patched tokio-quiche IO bridge
         run: |
