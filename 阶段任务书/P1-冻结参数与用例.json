@@ -1,6 +1,14 @@
 {
-  "schema_version": "p1-baseline-v2",
-  "configuration_version": "2026-09-19-p1",
+  "schema_version": "p1-baseline-v3",
+  "configuration_version": "2026-09-19-p1-final",
+  "normative_authority": {
+    "behavior_spec": "P1-修订规格与冻结基线.md",
+    "machine_contract": "P1-冻结参数与用例.json",
+    "host_mapping": "P1-恢复与IO事件桥接设计.md",
+    "parameter_provenance": "P1-冻结参数来源表.md",
+    "acceptance_matrix": "P1-Final-验收矩阵.md",
+    "precedence": "behavior_spec and machine_contract are normative; host mapping and tests may not override them"
+  },
   "scope": {
     "transport": "QUIC",
     "direction": "one-way sender",
@@ -26,6 +34,12 @@
       "ProbeBW.Up",
       "ProbeBW.Cruise"
     ],
+    "forbidden_bbr_phase": [
+      "Startup",
+      "Drain",
+      "ProbeRTT",
+      "ProbeBW.Down"
+    ],
     "max_relative_rate_gain": 1.1,
     "weight_step_per_bbr_round": 0.05,
     "max_duration_ms": 300,
@@ -35,7 +49,14 @@
     "no_benefit_round": 2,
     "minimum_model_gain_ratio": 1.02,
     "max_unrevocable_queue_bytes": 2400,
-    "budget_accounting": "pre-debit generated assist datagram bytes; no refund on socket failure"
+    "admission_granularity": "single_quic_datagram",
+    "admission_bytes_formula": "next_datagram_wire_bytes",
+    "budget_accounting": "pre-debit generated assist datagram bytes; no refund on socket failure, WouldBlock, or partial write",
+    "deadline_clock": "monotonic",
+    "deadline_check_resolution_ms": 1,
+    "deadline_grace_for_new_assist_ms": 0,
+    "deadline_admission_rule": "now_ms < assist_deadline_ms",
+    "timer_lateness_policy": "telemetry_only; never extends assist permission"
   },
   "guards": {
     "soft_queue_delay_min_ms": 10,
@@ -57,19 +78,178 @@
     "memory_bytes_per_connection": 262144,
     "actual_sent_accounting": "socket/GSO successful returned bytes only"
   },
+  "capabilities": {
+    "bbr_is_in_recovery": "not_used",
+    "loss_event": "supported via recovery loss detection",
+    "pto_event": "supported via recovery on_loss_detection_timeout",
+    "persistent_congestion_signal": "unsupported in frozen host; do not synthesize",
+    "ecn_ce_signal": "unsupported for BABR control in frozen host; do not synthesize"
+  },
+  "reason_codes": {
+    "TARGET_DISABLED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    },
+    "INVALID_TARGET": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "MODE_NOT_LITE": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    },
+    "PATH_CHANGED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "APP_LIMITED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "RECEIVER_LIMITED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "POLICY_LIMITED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "BBR_PHASE_PROTECTED": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    },
+    "LOSS_DETECTED": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": true
+    },
+    "PTO_FIRED": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": true
+    },
+    "BACKOFF_ACTIVE": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "SAMPLE_INVALID": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": true
+    },
+    "TARGET_NEAR": {
+      "next_state": "BASELINE",
+      "clear_w": true,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    },
+    "ASSIST_TIMEOUT": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "ASSIST_BUDGET_EXHAUSTED": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "MAX_ROUNDS": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "HARD_QUEUE_DELAY": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "NO_BENEFIT": {
+      "next_state": "ASSIST_BACKOFF",
+      "clear_w": true,
+      "increment_failure": true,
+      "enter_backoff": true,
+      "invalidate_sample": false
+    },
+    "SOFT_FREEZE": {
+      "next_state": "ASSIST",
+      "clear_w": false,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    },
+    "BOUNDED_PROBE": {
+      "next_state": "ASSIST",
+      "clear_w": false,
+      "increment_failure": false,
+      "enter_backoff": false,
+      "invalidate_sample": false
+    }
+  },
   "acceptance": {
     "primary": "500->100->500 Mbps, Target=200 Mbps; time to 0.9T improves by >=20%",
     "secondary": "500 Mbps, Target=200 Mbps, 1% and 5% random loss",
     "normal_goodput_regression_ratio": 0.03,
     "send_cost_increase_ratio": 0.1,
     "fairness_competitor_loss_ratio": 0.1,
-    "minimum_runs_per_key_scenario": 10
-  },
-  "capabilities": {
-    "bbr_is_in_recovery": "not_used",
-    "pto_event": "supported via recovery on_loss_detection_timeout",
-    "loss_event": "supported via recovery loss detection",
-    "persistent_congestion_signal": "unsupported in frozen host; do not synthesize",
-    "ecn_ce_signal": "unsupported for BABR control in frozen host; do not synthesize"
+    "minimum_runs_per_key_scenario": 10,
+    "synthetic_cases": [
+      "C01",
+      "C02",
+      "C03",
+      "C04",
+      "C05",
+      "C06",
+      "C07",
+      "C08",
+      "C09",
+      "C10",
+      "C11",
+      "C12",
+      "C13",
+      "C14",
+      "C15"
+    ]
   }
 }

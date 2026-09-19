@@ -1,4 +1,4 @@
-name: P1 Gate
+name: P1 Final Gate
 
 on:
   pull_request:
@@ -23,13 +23,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake clang pkg-config perl nasm
 
-      - name: Run P1 verification
+      - name: Run P1 Final Closure verification
         run: bash "阶段任务书/verify_p1.sh"
 
-      - name: Upload P1 evidence
+      - name: Upload P1 Final evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: p1-evidence-${{ github.sha }}
+          name: p1-final-evidence-${{ github.sha }}
           path: 阶段任务书/p1-artifacts
           if-no-files-found: warn
