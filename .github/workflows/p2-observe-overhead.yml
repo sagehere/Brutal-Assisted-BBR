@@ -63,13 +63,30 @@ jobs:
             -p quiche_apps \
             --bin quiche-client
 
-      - name: Run repeated real Observe CPU and Log60 evidence
+      - name: Run persistent long-sample Observe CPU gate
+        id: persistent_cpu
+        continue-on-error: true
+        env:
+          BABR_RATE_MBIT: "500"
+          BABR_ONE_WAY_DELAY_MS: "5"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_CPU_PAIRS: "20"
+          BABR_P2_CPU_CONNECTIONS_PER_SAMPLE: "4"
+          BABR_P2_CPU_FLOW_BYTES: "268435456"
+          BABR_P2_CPU_WARMUP_BYTES: "67108864"
+          BABR_P2_CPU_LIMIT_RATIO: "0.02"
+          BABR_P2_CPU_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-cpu-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-cpu-persistent.sh
+
+      - name: Run real-network CPU diagnostic and Log60 evidence
         env:
           BABR_RATE_MBIT: "100"
           BABR_ONE_WAY_DELAY_MS: "20"
           BABR_LOSS_PCT: "0"
           BABR_DATA_DIRECTION: "receiver_to_sender"
-          BABR_P2_OVERHEAD_PAIRS: "20"
+          BABR_P2_OVERHEAD_PAIRS: "10"
           BABR_P2_OVERHEAD_WARMUP_BYTES: "67108864"
           BABR_P2_OVERHEAD_FLOW_BYTES: "268435456"
           BABR_P2_LOG_FLOW_BYTES: "805306368"
@@ -100,23 +117,32 @@ jobs:
           import json
           from pathlib import Path
 
+          cpu_path = Path("阶段任务书/p2-observe-cpu-artifacts/cpu-summary.json")
           cpu_log_path = Path("阶段任务书/p2-observe-overhead-artifacts/cpu-log-summary.json")
           memory_path = Path("阶段任务书/p2-observe-memory-artifacts/memory-summary.json")
           out_path = Path("阶段任务书/p2-observe-resource-gate-summary.json")
 
+          if not cpu_path.exists():
+              raise SystemExit(f"missing persistent CPU summary: {cpu_path}")
           if not cpu_log_path.exists():
-              raise SystemExit(f"missing CPU/Log60 summary: {cpu_log_path}")
+              raise SystemExit(f"missing real-network Log60 summary: {cpu_log_path}")
           if not memory_path.exists():
               raise SystemExit(f"missing memory slope summary: {memory_path}")
 
+          cpu = json.loads(cpu_path.read_text(encoding="utf-8"))
           cpu_log = json.loads(cpu_log_path.read_text(encoding="utf-8"))
           memory = json.loads(memory_path.read_text(encoding="utf-8"))
 
           summary = {
-              "schema": "p2-observe-resource-gate-v2",
-              "cpu_p95_overhead_ratio": cpu_log["cpu_p95_overhead_ratio"],
-              "cpu_limit_ratio": cpu_log["cpu_limit_ratio"],
-              "cpu_pass": cpu_log["cpu_pass"],
+              "schema": "p2-observe-resource-gate-v3",
+              "cpu_metric": cpu["metric"],
+              "cpu_p95_overhead_ratio": cpu["p95_cpu_overhead_ratio"],
+              "cpu_median_overhead_ratio": cpu["median_cpu_overhead_ratio"],
+              "cpu_limit_ratio": cpu["limit_ratio"],
+              "cpu_pass": cpu["cpu_pass"],
+              "real_network_cpu_p95_diagnostic": cpu_log[
+                  "cpu_p95_overhead_ratio"
+              ],
               "memory_p95_incremental_bytes_per_connection": memory[
                   "p95_incremental_bytes_per_connection"
               ],
@@ -148,6 +174,7 @@ jobs:
         if: always()
         run: |
           for f in \
+            阶段任务书/p2-observe-cpu-artifacts/cpu-summary.json \
             阶段任务书/p2-observe-overhead-artifacts/overhead-summary.json \
             阶段任务书/p2-observe-overhead-artifacts/log60-summary.json \
             阶段任务书/p2-observe-overhead-artifacts/cpu-log-summary.json \
@@ -166,6 +193,7 @@ jobs:
         with:
           name: p2-observe-overhead-${{ github.sha }}
           path: |
+            阶段任务书/p2-observe-cpu-artifacts
             阶段任务书/p2-observe-overhead-artifacts
             阶段任务书/p2-observe-memory-artifacts
             阶段任务书/p2-observe-resource-gate-summary.json
