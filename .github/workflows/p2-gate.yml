@@ -44,6 +44,16 @@ jobs:
             --lib \
             --features gcongestion
 
+      - name: Verify host-level Off equals Observe transport outputs
+        run: |
+          cargo test \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p quiche \
+            --lib \
+            --features gcongestion \
+            babr_off_observe_host_outputs_identical_with_telemetry_toggle \
+            -- --exact --nocapture
+
       - name: Build and test patched tokio-quiche IO bridge
         run: |
           cargo test \
