@@ -1,7 +1,7 @@
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -54,8 +54,101 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
+@@ -54,7 +54,101 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
  use super::bbr2::BabrObserveSnapshot;
  use super::bbr2::BBRv2;
  use super::pacer::Pacer;
@@ -101,7 +101,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +    pub(crate) guards: BabrTransportGuardCounters,
 +    pub(crate) accounting: BabrObserveAccounting,
 +}
- 
++
  // Congestion Control
 @@ -323,7 +323,9 @@ pub struct GRecovery {
      bytes_in_flight: BytesInFlight,
