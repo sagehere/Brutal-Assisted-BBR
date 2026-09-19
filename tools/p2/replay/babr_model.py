@@ -345,6 +345,183 @@ class BabrReferenceController:
         )
 
 
+
+@dataclass(frozen=True)
+class PayloadSpan:
+    stream_id: int
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True)
+class AccountingSnapshot:
+    actual_socket_sent_bytes: int
+    unique_payload_delivered_bytes: int
+    sent_packets: int
+    loss_events: int
+    ack_events: int
+    spurious_ack_events: int
+
+
+@dataclass
+class _ReplayPacket:
+    actual_socket_bytes: int
+    payload: tuple[PayloadSpan, ...]
+    state: str = "sent"
+
+
+class DeliveryAccountingReplay:
+    """Deterministic transport-accounting replay for P2.
+
+    This models the accounting contract only. Every successful socket send is
+    charged in full, while STREAM payload delivery is deduplicated by
+    (stream_id, offset range). An ACK for a packet previously declared lost is
+    deliberately accepted as a late/spurious ACK so L06 can prove that payload
+    delivery is still counted only once.
+    """
+
+    def __init__(self) -> None:
+        self._packets: dict[int, _ReplayPacket] = {}
+        self._delivered: dict[int, list[tuple[int, int]]] = {}
+        self.actual_socket_sent_bytes = 0
+        self.unique_payload_delivered_bytes = 0
+        self.loss_events = 0
+        self.ack_events = 0
+        self.spurious_ack_events = 0
+
+    def _insert_unique_range(
+        self, stream_id: int, start: int, end: int
+    ) -> int:
+        if end <= start:
+            return 0
+
+        ranges = self._delivered.setdefault(stream_id, [])
+        old_total = sum(e - s for s, e in ranges)
+
+        merged: list[tuple[int, int]] = []
+        cur_start, cur_end = start, end
+        placed = False
+
+        for s, e in ranges:
+            if e < cur_start:
+                merged.append((s, e))
+                continue
+
+            if cur_end < s:
+                if not placed:
+                    merged.append((cur_start, cur_end))
+                    placed = True
+                merged.append((s, e))
+                continue
+
+            cur_start = min(cur_start, s)
+            cur_end = max(cur_end, e)
+
+        if not placed:
+            merged.append((cur_start, cur_end))
+
+        merged.sort()
+        self._delivered[stream_id] = merged
+        new_total = sum(e - s for s, e in merged)
+        return max(0, new_total - old_total)
+
+    def send(
+        self,
+        packet_id: int,
+        actual_socket_bytes: int,
+        payload: list[PayloadSpan] | tuple[PayloadSpan, ...],
+    ) -> AccountingSnapshot:
+        if packet_id in self._packets:
+            raise ValueError(f"packet_id already sent: {packet_id}")
+        if actual_socket_bytes < 0:
+            raise ValueError("actual_socket_bytes must be non-negative")
+
+        spans = tuple(payload)
+        for span in spans:
+            if span.offset < 0 or span.length < 0:
+                raise ValueError("payload offset/length must be non-negative")
+
+        self._packets[packet_id] = _ReplayPacket(
+            actual_socket_bytes=actual_socket_bytes,
+            payload=spans,
+        )
+        self.actual_socket_sent_bytes += actual_socket_bytes
+        return self.snapshot()
+
+    def loss(self, packet_id: int) -> AccountingSnapshot:
+        packet = self._packets[packet_id]
+        if packet.state == "acked":
+            raise ValueError("acked packet cannot become lost")
+        if packet.state != "lost":
+            packet.state = "lost"
+            self.loss_events += 1
+        return self.snapshot()
+
+    def ack(self, packet_id: int) -> AccountingSnapshot:
+        packet = self._packets[packet_id]
+        if packet.state == "acked":
+            return self.snapshot()
+
+        if packet.state == "lost":
+            self.spurious_ack_events += 1
+
+        packet.state = "acked"
+        self.ack_events += 1
+
+        for span in packet.payload:
+            delta = self._insert_unique_range(
+                span.stream_id,
+                span.offset,
+                span.offset + span.length,
+            )
+            self.unique_payload_delivered_bytes += delta
+
+        return self.snapshot()
+
+    def snapshot(self) -> AccountingSnapshot:
+        return AccountingSnapshot(
+            actual_socket_sent_bytes=self.actual_socket_sent_bytes,
+            unique_payload_delivered_bytes=self.unique_payload_delivered_bytes,
+            sent_packets=len(self._packets),
+            loss_events=self.loss_events,
+            ack_events=self.ack_events,
+            spurious_ack_events=self.spurious_ack_events,
+        )
+
+
+def run_accounting_trace(trace: dict[str, Any]) -> list[AccountingSnapshot]:
+    replay = DeliveryAccountingReplay()
+    snapshots: list[AccountingSnapshot] = []
+
+    for event in trace["events"]:
+        kind = event["type"]
+        packet_id = int(event["packet_id"])
+
+        if kind == "send":
+            payload = [
+                PayloadSpan(
+                    stream_id=int(span["stream_id"]),
+                    offset=int(span["offset"]),
+                    length=int(span["length"]),
+                )
+                for span in event.get("payload", [])
+            ]
+            snapshot = replay.send(
+                packet_id=packet_id,
+                actual_socket_bytes=int(event["actual_socket_bytes"]),
+                payload=payload,
+            )
+        elif kind == "loss":
+            snapshot = replay.loss(packet_id)
+        elif kind == "ack":
+            snapshot = replay.ack(packet_id)
+        else:
+            raise ValueError(f"unknown accounting event type: {kind}")
+
+        snapshots.append(snapshot)
+
+    return snapshots
+
 def load_rules(path: str | Path) -> FrozenRules:
     contract = json.loads(Path(path).read_text(encoding="utf-8"))
     if contract.get("schema_version") != "p1-baseline-v3":
