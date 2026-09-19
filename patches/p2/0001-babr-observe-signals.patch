@@ -1,5 +1,5 @@
 diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
-index 3c2f28e..babr001 100644
+
 --- a/quiche/src/recovery/gcongestion/bbr2.rs
 +++ b/quiche/src/recovery/gcongestion/bbr2.rs
 @@ -35,6 +35,7 @@ use crate::recovery::RecoveryStats;
@@ -205,7 +205,7 @@ index 3c2f28e..babr001 100644
 +    }
  }
 diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
-index 0a63b9b..babr002 100644
+
 --- a/quiche/src/recovery/gcongestion/pacer.rs
 +++ b/quiche/src/recovery/gcongestion/pacer.rs
 @@ -29,6 +29,7 @@
@@ -228,7 +228,7 @@ index 0a63b9b..babr002 100644
          &mut self, sent_time: Instant, bytes_in_flight: usize,
          packet_number: u64, bytes: usize, is_retransmissible: bool,
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
-index 111c36c..babr003 100644
+
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
 @@ -54,7 +54,8 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
