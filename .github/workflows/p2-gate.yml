@@ -1,0 +1,25 @@
+name: P2 Observe Gate
+
+on:
+  pull_request:
+    paths:
+      - "tools/p2/**"
+      - "阶段任务书/P2-**"
+      - "阶段任务书/02-观测模式与BABR-Lite原型任务书.md"
+      - "阶段任务书/P1-冻结参数与用例.json"
+      - ".github/workflows/p2-gate.yml"
+  workflow_dispatch:
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify P2 Observe reference model
+        run: bash tools/p2/verify_observe.sh
