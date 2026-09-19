@@ -62,11 +62,14 @@ diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
 diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 --- a/quiche/src/lib.rs
 +++ b/quiche/src/lib.rs
-@@ -140,1 +140,2 @@
--use std::collections::VecDeque;
+@@ -387,5 +387,6 @@
+ use std::cmp;
+ 
 +use std::collections::BTreeMap;
-+use std::collections::VecDeque;
-@@ -515,4 +516,48 @@ impl StreamsBlockedState {
+ use std::collections::VecDeque;
+ 
+ use debug_panic::debug_panic;
+@@ -1306,4 +1307,72 @@ impl StreamsBlockedState {
      }
  }
  
@@ -114,11 +117,6 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +    }
 +}
 +
- /// A QUIC connection.
-@@ -530,4 +530,28 @@ impl BabrUniquePayloadTracker {
-     }
- }
- 
 +#[cfg(test)]
 +mod babr_p2_unique_payload_tests {
 +    use super::BabrUniquePayloadTracker;
@@ -144,7 +142,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +}
 +
  /// A QUIC connection.
-@@ -620,4 +668,7 @@ pub struct Connection<F = DefaultBufFactory>
+@@ -1435,4 +1509,7 @@ pub struct Connection<F = DefaultBufFactory>
      /// Total number of bytes sent lost over the connection.
      lost_bytes: u64,
  
@@ -152,14 +150,16 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +    babr_unique_payload: BabrUniquePayloadTracker,
 +
      /// Streams map.
-@@ -1825,5 +1877,6 @@ impl<F: BufFactory> Connection<F> {
-             recv_bytes: 0,
+@@ -2099,4 +2176,5 @@ impl<F: BufFactory> Connection<F> {
              acked_bytes: 0,
              lost_bytes: 0,
 +            babr_unique_payload: BabrUniquePayloadTracker::default(),
  
              rx_data: 0,
-@@ -3910,4 +3963,8 @@ impl<F: BufFactory> Connection<F> {
+@@ -3592,7 +3670,11 @@ impl<F: BufFactory> Connection<F> {
+                     frame::Frame::StreamHeader {
+                         stream_id,
+                         offset,
                          length,
                          ..
                      } => {
@@ -168,7 +168,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 +                        );
 +
                          // Emit qlog before checking if the stream still exists.
-@@ -4010,5 +4068,13 @@ impl<F: BufFactory> Connection<F> {
+@@ -3723,5 +3805,13 @@ impl<F: BufFactory> Connection<F> {
                  }
              }
          }
