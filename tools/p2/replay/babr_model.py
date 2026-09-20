@@ -2,7 +2,7 @@
 """Deterministic BABR P2 reference model.
 
 This module is deliberately transport-free: it cannot send packets and is not
-linked into quiche. It makes the frozen p1-baseline-v3 rules executable before
+linked into quiche. It makes the frozen p1-baseline-v4 rules executable before
 host integration. Observe mode may evolve a shadow assist state for telemetry,
 but final pacing/cwnd/send permission remain the baseline.
 """
@@ -253,7 +253,21 @@ class BabrReferenceController:
                 **{**d.__dict__, "soft_guard": soft, "hard_guard": hard}
             )
 
-        if s.model_delivery_rate >= self.rules.target_exit_ratio * self.target:
+        if (
+            self.state != State.ASSIST
+            and s.model_delivery_rate >= self.rules.target_enter_ratio * self.target
+        ):
+            self._clear_assist()
+            return self._baseline(
+                s,
+                "MODE_NOT_LITE" if self.mode == Mode.OBSERVE else "TARGET_NEAR",
+                "TARGET_NEAR",
+            )
+
+        if (
+            self.state == State.ASSIST
+            and s.model_delivery_rate >= self.rules.target_exit_ratio * self.target
+        ):
             self._clear_assist()
             return self._baseline(
                 s,
@@ -293,7 +307,7 @@ class BabrReferenceController:
                 "NO_BENEFIT",
             )
 
-        if self.rounds > self.rules.max_rounds:
+        if self.rounds >= self.rules.max_rounds:
             self._clear_assist()
             return self._baseline(
                 s,
@@ -524,6 +538,6 @@ def run_accounting_trace(trace: dict[str, Any]) -> list[AccountingSnapshot]:
 
 def load_rules(path: str | Path) -> FrozenRules:
     contract = json.loads(Path(path).read_text(encoding="utf-8"))
-    if contract.get("schema_version") != "p1-baseline-v3":
-        raise ValueError("P2 requires schema_version=p1-baseline-v3")
+    if contract.get("schema_version") != "p1-baseline-v4":
+        raise ValueError("P2 requires schema_version=p1-baseline-v4")
     return FrozenRules.from_contract(contract)
