@@ -5,6 +5,9 @@ concurrency:
   cancel-in-progress: true
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/p2-cpu-profile.yml"
   workflow_dispatch:
     inputs:
       profile_mode:
@@ -63,7 +66,7 @@ jobs:
           BABR_P2_CPU_WARMUP_BYTES: "67108864"
           BABR_P2_CPU_LIMIT_RATIO: "1.0"
           BABR_P2_CPU_PROFILE_PAIR: "5"
-          BABR_P2_CPU_PROFILE_MODE: ${{ inputs.profile_mode }}
+          BABR_P2_CPU_PROFILE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile_mode || 'both' }}
           BABR_P2_CPU_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-cpu-profile-artifacts
         run: |
           sudo -E bash tools/p2/netns/run-observe-cpu-persistent.sh
