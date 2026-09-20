@@ -13,7 +13,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,744 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -44,6 +44,8 @@ new file mode 100644
 +const MINIMUM_MODEL_GAIN_NUMERATOR: u64 = 102;
 +const MINIMUM_MODEL_GAIN_DENOMINATOR: u64 = 100;
 +const MAX_ASSIST_DURATION: Duration = Duration::from_millis(300);
++const BACKOFF_BASE_MS: u64 = 30_000;
++const BACKOFF_MAX_MS: u64 = 600_000;
 +
 +const SOFT_QUEUE_DELAY_MIN: Duration = Duration::from_millis(10);
 +const HARD_QUEUE_DELAY_MIN: Duration = Duration::from_millis(20);
@@ -59,6 +61,7 @@ new file mode 100644
 +pub(crate) enum BabrLiteState {
 +    Baseline,
 +    Assist,
++    AssistBackoff,
 +}
 +
 +#[derive(Debug, Clone, Copy)]
@@ -104,6 +107,8 @@ new file mode 100644
 +    rounds: u8,
 +    reference_rate_bytes_per_second: Option<u64>,
 +    assist_deadline: Option<Instant>,
++    failure_count: u32,
++    backoff_deadline: Option<Instant>,
 +}
 +
 +impl Default for BabrLiteController {
@@ -117,6 +122,8 @@ new file mode 100644
 +            rounds: 0,
 +            reference_rate_bytes_per_second: None,
 +            assist_deadline: None,
++            failure_count: 0,
++            backoff_deadline: None,
 +        }
 +    }
 +}
@@ -129,7 +136,7 @@ new file mode 100644
 +    pub(crate) fn set_mode(&mut self, mode: BabrMode) {
 +        if mode != self.mode {
 +            self.mode = mode;
-+            self.clear_assist();
++            self.enter_baseline();
 +        }
 +    }
 +
@@ -141,12 +148,47 @@ new file mode 100644
 +        self.max_rate_bytes_per_second = max_rate;
 +    }
 +
-+    fn clear_assist(&mut self) {
-+        self.state = BabrLiteState::Baseline;
++    fn clear_assist_round(&mut self) {
 +        self.weight_steps = 0;
 +        self.rounds = 0;
 +        self.reference_rate_bytes_per_second = None;
 +        self.assist_deadline = None;
++    }
++
++    fn enter_baseline(&mut self) {
++        self.state = BabrLiteState::Baseline;
++        self.clear_assist_round();
++    }
++
++    fn enter_backoff(&mut self, now: Instant) {
++        self.failure_count = self.failure_count.saturating_add(1);
++        let shift = self.failure_count.saturating_sub(1).min(31);
++        let multiplier = 1u64 << shift;
++        let backoff_ms = BACKOFF_BASE_MS
++            .saturating_mul(multiplier)
++            .min(BACKOFF_MAX_MS);
++
++        self.state = BabrLiteState::AssistBackoff;
++        self.clear_assist_round();
++        self.backoff_deadline =
++            Some(now + Duration::from_millis(backoff_ms));
++    }
++
++    fn backoff_active(&mut self, now: Instant) -> bool {
++        if let Some(deadline) = self.backoff_deadline {
++            if now < deadline {
++                self.state = BabrLiteState::AssistBackoff;
++                self.clear_assist_round();
++                return true;
++            }
++
++            self.backoff_deadline = None;
++            if self.state == BabrLiteState::AssistBackoff {
++                self.state = BabrLiteState::Baseline;
++            }
++        }
++
++        false
 +    }
 +
 +    fn baseline_decision(
@@ -247,7 +289,7 @@ new file mode 100644
 +        &mut self, input: BabrLiteInput,
 +    ) -> BabrLiteDecision {
 +        if let Some(reason) = self.target_reason() {
-+            self.clear_assist();
++            self.enter_baseline();
 +            return self.baseline_decision(
 +                input,
 +                self.output_reason(reason),
@@ -258,7 +300,7 @@ new file mode 100644
 +        }
 +
 +        if self.mode == BabrMode::Off {
-+            self.clear_assist();
++            self.enter_baseline();
 +            return self.baseline_decision(
 +                input,
 +                BabrReasonCode::ModeNotLite,
@@ -271,7 +313,15 @@ new file mode 100644
 +        let (guard_reason, soft_guard, hard_guard) =
 +            self.guard_reason(input);
 +        if let Some(reason) = guard_reason {
-+            self.clear_assist();
++            match reason {
++                BabrReasonCode::LossDetected |
++                BabrReasonCode::PtoFired |
++                BabrReasonCode::HardQueueDelay => {
++                    self.enter_backoff(input.now);
++                },
++                _ => self.enter_baseline(),
++            }
++
 +            return self.baseline_decision(
 +                input,
 +                self.output_reason(reason),
@@ -281,18 +331,11 @@ new file mode 100644
 +            );
 +        }
 +
-+        let target_near_threshold = self
-+            .target_bytes_per_second
-+            .saturating_mul(TARGET_EXIT_NUMERATOR) /
-+            TARGET_EXIT_DENOMINATOR;
-+        if input.model_delivery_rate_bytes_per_second >=
-+            target_near_threshold
-+        {
-+            self.clear_assist();
++        if self.backoff_active(input.now) {
 +            return self.baseline_decision(
 +                input,
-+                self.output_reason(BabrReasonCode::TargetNear),
-+                BabrReasonCode::TargetNear,
++                self.output_reason(BabrReasonCode::BackoffActive),
++                BabrReasonCode::BackoffActive,
 +                false,
 +                false,
 +            );
@@ -313,7 +356,7 @@ new file mode 100644
 +        let deadline = self.assist_deadline.unwrap_or(input.now);
 +
 +        if input.now >= deadline {
-+            self.clear_assist();
++            self.enter_backoff(input.now);
 +            return self.baseline_decision(
 +                input,
 +                self.output_reason(BabrReasonCode::AssistTimeout),
@@ -326,6 +369,23 @@ new file mode 100644
 +        // ACKs are not a control clock. Only a real BBR packet-timed round may
 +        // consume a round budget or advance W.
 +        if !input.end_of_round_trip {
++            let target_near_threshold = self
++                .target_bytes_per_second
++                .saturating_mul(TARGET_EXIT_NUMERATOR) /
++                TARGET_EXIT_DENOMINATOR;
++            if input.model_delivery_rate_bytes_per_second >=
++                target_near_threshold
++            {
++                self.enter_baseline();
++                return self.baseline_decision(
++                    input,
++                    self.output_reason(BabrReasonCode::TargetNear),
++                    BabrReasonCode::TargetNear,
++                    false,
++                    false,
++                );
++            }
++
 +            let reason = if soft_guard {
 +                BabrReasonCode::SoftFreeze
 +            } else {
@@ -338,12 +398,25 @@ new file mode 100644
 +
 +        self.rounds = self.rounds.saturating_add(1);
 +
++        // "Already 3 BBR rounds" ends the assist at the third round boundary.
++        // Do not leave an assist increment active until a fourth round arrives.
++        if self.rounds >= MAX_ASSIST_ROUNDS {
++            self.enter_backoff(input.now);
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::MaxRounds),
++                BabrReasonCode::MaxRounds,
++                false,
++                false,
++            );
++        }
++
 +        if self.rounds >= NO_BENEFIT_ROUND &&
 +            input.model_delivery_rate_bytes_per_second
 +                .saturating_mul(MINIMUM_MODEL_GAIN_DENOMINATOR) <
 +            reference_rate.saturating_mul(MINIMUM_MODEL_GAIN_NUMERATOR)
 +        {
-+            self.clear_assist();
++            self.enter_backoff(input.now);
 +            return self.baseline_decision(
 +                input,
 +                self.output_reason(BabrReasonCode::NoBenefit),
@@ -353,12 +426,18 @@ new file mode 100644
 +            );
 +        }
 +
-+        if self.rounds > MAX_ASSIST_ROUNDS {
-+            self.clear_assist();
++        let target_near_threshold = self
++            .target_bytes_per_second
++            .saturating_mul(TARGET_EXIT_NUMERATOR) /
++            TARGET_EXIT_DENOMINATOR;
++        if input.model_delivery_rate_bytes_per_second >=
++            target_near_threshold
++        {
++            self.enter_baseline();
 +            return self.baseline_decision(
 +                input,
-+                self.output_reason(BabrReasonCode::MaxRounds),
-+                BabrReasonCode::MaxRounds,
++                self.output_reason(BabrReasonCode::TargetNear),
++                BabrReasonCode::TargetNear,
 +                false,
 +                false,
 +            );
@@ -494,6 +573,7 @@ new file mode 100644
 +
 +        let d2 = c.on_round(input(now + Duration::from_millis(20)));
 +        assert_eq!(d2.shadow_reason, BabrReasonCode::NoBenefit);
++        assert_eq!(d2.state, BabrLiteState::AssistBackoff);
 +        assert_eq!(d2.weight_steps, 0);
 +        assert!(!d2.control_applied);
 +    }
@@ -541,6 +621,7 @@ new file mode 100644
 +
 +        let d2 = c.on_round(input(now + MAX_ASSIST_DURATION));
 +        assert_eq!(d2.shadow_reason, BabrReasonCode::AssistTimeout);
++        assert_eq!(d2.state, BabrLiteState::AssistBackoff);
 +        assert_eq!(d2.weight_steps, 0);
 +        assert!(!d2.control_applied);
 +    }
@@ -554,6 +635,7 @@ new file mode 100644
 +
 +        let d = c.on_round(s);
 +        assert_eq!(d.shadow_reason, BabrReasonCode::HardQueueDelay);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
 +        assert!(d.hard_guard);
 +        assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
 +        assert!(!d.control_applied);
@@ -569,5 +651,110 @@ new file mode 100644
 +        let d = c.on_round(input(now + Duration::from_millis(1)));
 +        assert_eq!(d.weight_steps, 0);
 +        assert_eq!(d.state, BabrLiteState::Baseline);
++    }
++
++    #[test]
++    fn loss_enters_backoff_and_blocks_reentry_until_deadline() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++
++        let failed = c.on_round(loss);
++        assert_eq!(failed.shadow_reason, BabrReasonCode::LossDetected);
++        assert_eq!(failed.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++        assert_eq!(
++            c.backoff_deadline,
++            Some(now + Duration::from_millis(BACKOFF_BASE_MS)),
++        );
++
++        let blocked = c.on_round(input(now + Duration::from_secs(29)));
++        assert_eq!(blocked.shadow_reason, BabrReasonCode::BackoffActive);
++        assert_eq!(blocked.state, BabrLiteState::AssistBackoff);
++        assert_eq!(blocked.weight_steps, 0);
++
++        let resumed = c.on_round(input(now + Duration::from_secs(30)));
++        assert_eq!(resumed.shadow_reason, BabrReasonCode::BoundedProbe);
++        assert_eq!(resumed.state, BabrLiteState::Assist);
++        assert_eq!(resumed.weight_steps, 1);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn mode_and_target_changes_do_not_clear_backoff_history() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++        c.on_round(loss);
++        let deadline = c.backoff_deadline;
++
++        c.set_mode(BabrMode::Off);
++        c.set_target_bytes_per_second(30_000_000);
++        assert_eq!(c.backoff_deadline, deadline);
++        assert_eq!(c.failure_count, 1);
++
++        c.set_mode(BabrMode::Lite);
++        let blocked = c.on_round(input(now + Duration::from_secs(1)));
++        assert_eq!(blocked.shadow_reason, BabrReasonCode::BackoffActive);
++        assert_eq!(blocked.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn repeated_failures_double_backoff_up_to_frozen_schedule() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++        c.on_round(loss);
++
++        let restart = now + Duration::from_secs(30);
++        assert_eq!(c.on_round(input(restart)).state, BabrLiteState::Assist);
++
++        let second_failure_time = restart + Duration::from_secs(1);
++        let mut pto = input(second_failure_time);
++        pto.pto_fired = true;
++        let failed = c.on_round(pto);
++        assert_eq!(failed.shadow_reason, BabrReasonCode::PtoFired);
++        assert_eq!(c.failure_count, 2);
++        assert_eq!(
++            c.backoff_deadline,
++            Some(second_failure_time + Duration::from_secs(60)),
++        );
++    }
++
++    #[test]
++    fn third_complete_round_exits_with_max_rounds() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        assert_eq!(c.on_round(input(now)).weight_steps, 1);
++
++        let mut second = input(now + Duration::from_millis(20));
++        second.model_delivery_rate_bytes_per_second = 20_500_000;
++        assert_eq!(c.on_round(second).weight_steps, 2);
++
++        let mut third = input(now + Duration::from_millis(40));
++        third.model_delivery_rate_bytes_per_second = 20_500_000;
++        let d = c.on_round(third);
++        assert_eq!(d.shadow_reason, BabrReasonCode::MaxRounds);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn timeout_has_priority_over_target_near() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        let mut late = input(now + MAX_ASSIST_DURATION);
++        late.model_delivery_rate_bytes_per_second = 24_000_000;
++        let d = c.on_round(late);
++        assert_eq!(d.shadow_reason, BabrReasonCode::AssistTimeout);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
 +    }
 +}
