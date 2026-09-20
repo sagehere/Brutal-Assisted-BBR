@@ -475,8 +475,27 @@ new file mode 100644
 +        let d2 = c.on_round(not_round);
 +        assert_eq!(d2.weight_steps, 1);
 +
-+        let d3 = c.on_round(input(now + Duration::from_millis(20)));
++        let mut second_round = input(now + Duration::from_millis(20));
++        // Keep this test focused on the packet-timed-round control clock:
++        // provide >=2% model gain so the frozen NO_BENEFIT rule does not
++        // intentionally terminate assist on the second complete round.
++        second_round.model_delivery_rate_bytes_per_second = 20_500_000;
++        let d3 = c.on_round(second_round);
 +        assert_eq!(d3.weight_steps, 2);
++    }
++
++    #[test]
++    fn lite_no_benefit_clears_weight_after_two_complete_rounds() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        let d1 = c.on_round(input(now));
++        assert_eq!(d1.weight_steps, 1);
++
++        let d2 = c.on_round(input(now + Duration::from_millis(20)));
++        assert_eq!(d2.shadow_reason, BabrReasonCode::NoBenefit);
++        assert_eq!(d2.weight_steps, 0);
++        assert!(!d2.control_applied);
 +    }
 +
 +    #[test]
