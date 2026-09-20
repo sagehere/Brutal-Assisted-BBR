@@ -196,6 +196,47 @@ process_allowed_cpu_list() {
   awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/status"
 }
 
+thread_allowed_cpu_list() {
+  local pid="$1"
+  local tid="$2"
+  awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/task/$tid/status"
+}
+
+pin_existing_server_threads() {
+  local pid="$1"
+  local mode="$2"
+  local before after task tid affinity
+
+  before="$(process_thread_count "$pid")"
+  if (( before < 3 )); then
+    echo "$mode server runtime initialized with only $before threads before pinning" >&2
+    return 1
+  fi
+
+  for task in "/proc/$pid/task"/*; do
+    tid="${task##*/}"
+    taskset -pc "$SERVER_CPU" "$tid" >/dev/null
+  done
+
+  sleep 0.05
+  after="$(process_thread_count "$pid")"
+  if [[ "$before" != "$after" ]]; then
+    echo "$mode server thread topology changed while pinning: $before -> $after" >&2
+    return 1
+  fi
+
+  for task in "/proc/$pid/task"/*; do
+    tid="${task##*/}"
+    affinity="$(thread_allowed_cpu_list "$pid" "$tid")"
+    if [[ "$affinity" != "$SERVER_CPU" ]]; then
+      echo "$mode server thread $tid affinity mismatch: expected $SERVER_CPU got $affinity" >&2
+      return 1
+    fi
+  done
+
+  echo "$before"
+}
+
 PROFILE_PID=""
 start_profile_if_requested() {
   local mode="$1"
@@ -253,7 +294,7 @@ start_server() {
     server_env+=("BABR_OBSERVE_TELEMETRY_FILE=/dev/null")
   fi
 
-  python3 "$HERE/run_with_rusage.py"     --pid-file "$pid_file"     --metrics-file "$rusage_file"     --     ip netns exec "$NS_D" env "${server_env[@]}"     taskset -c "$SERVER_CPU" "$SERVER_BIN"       --address "$D_IP:$port"       --cc-algorithm bbr2       --enable-pacing     > "$dir/server.log" 2>&1 &
+  python3 "$HERE/run_with_rusage.py"     --pid-file "$pid_file"     --metrics-file "$rusage_file"     --     ip netns exec "$NS_D" env "${server_env[@]}"     "$SERVER_BIN"       --address "$D_IP:$port"       --cc-algorithm bbr2       --enable-pacing     > "$dir/server.log" 2>&1 &
 
   local wrapper_pid=$!
   wait_for_pid_file "$pid_file"
@@ -261,12 +302,10 @@ start_server() {
   server_pid="$(cat "$pid_file")"
   wait_for_port "$port" "$server_pid"
 
-  local actual_affinity
-  actual_affinity="$(process_allowed_cpu_list "$server_pid")"
-  if [[ "$actual_affinity" != "$SERVER_CPU" ]]; then
-    echo "$mode server affinity mismatch: expected $SERVER_CPU got $actual_affinity" >&2
-    return 1
-  fi
+  local runtime_threads
+  runtime_threads="$(pin_existing_server_threads "$server_pid" "$mode")"
+  printf '%s\n' "$runtime_threads" > "$dir/runtime-threads-before-pin.txt"
+  printf '%s\n' "$SERVER_CPU" > "$dir/server-cpu-affinity.txt"
 
   if [[ "$mode" == "off" ]]; then
     OFF_PID="$server_pid"
@@ -394,7 +433,7 @@ PY
 bash "$HERE/setup.sh" >/dev/null
 BABR_DATA_DIRECTION="$DATA_DIRECTION" bash "$HERE/shape.sh" >/dev/null
 
-echo "Persistent CPU affinity: server=$SERVER_CPU client=$CLIENT_CPU allowed=${ALLOWED_CPUS[*]}"
+echo "Persistent CPU affinity: post-init server-thread pin=$SERVER_CPU client=$CLIENT_CPU allowed=${ALLOWED_CPUS[*]}"
 
 start_server off "$OFF_PORT"
 start_server observe "$OBSERVE_PORT"
@@ -460,8 +499,10 @@ summary = {
     "pairs": count,
     "metric": (
         "paired persistent-server scheduled CPU runtime; ABBA order; "
-        "Off/Observe pinned to the same server CPU; clients pinned separately; "
-        "multiple connections per sample; startup/shutdown excluded"
+        "server runtime initialized with the normal thread topology, then all "
+        "existing Off/Observe server threads pinned to the same CPU; clients "
+        "pinned separately; multiple connections per sample; "
+        "startup/shutdown excluded"
     ),
     "p95_method": "nearest-rank",
     "median_cpu_overhead_ratio": statistics.median(values),
