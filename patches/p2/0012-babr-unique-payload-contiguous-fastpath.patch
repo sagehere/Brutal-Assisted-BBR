@@ -1,0 +1,28 @@
+diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
+--- a/quiche/src/stream/send_buf.rs
++++ b/quiche/src/stream/send_buf.rs
+@@ -555,6 +555,24 @@ impl<F: BufFactory> SendBuf<F> {
+         &self, off: u64, len: usize,
+     ) -> u64 {
+         let end = off + len as u64;
++
++        // The steady-state long-flow case is a single contiguous ACK prefix
++        // starting at offset 0. Avoid the generic RangeSet overlap walk in
++        // that overwhelmingly common case; retain the exact fallback for
++        // reordering, retransmission, gaps, and overlapping ACK ranges.
++        match self.acked.len() {
++            0 => return end - off,
++
++            1 => {
++                let ack_off = self.ack_off();
++                if ack_off > 0 {
++                    return end.saturating_sub(cmp::max(off, ack_off));
++                }
++            },
++
++            _ => {},
++        }
++
+         (end - off).saturating_sub(self.acked.babr_covered_bytes(off..end))
+     }
+ 
