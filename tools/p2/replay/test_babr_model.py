@@ -40,7 +40,7 @@ def snap(**kw):
 class P2ObserveTests(unittest.TestCase):
     def test_contract_is_frozen_v3(self):
         contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-        self.assertEqual(contract["schema_version"], "p1-baseline-v3")
+        self.assertEqual(contract["schema_version"], "p1-baseline-v4")
         self.assertEqual(
             set(contract["assist"]["allowed_bbr_phase"]),
             {"ProbeBW.Refill", "ProbeBW.Up", "ProbeBW.Cruise"},
