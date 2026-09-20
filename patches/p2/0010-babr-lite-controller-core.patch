@@ -13,7 +13,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
-@@ -0,0 +1,813 @@
+@@ -0,0 +1,844 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -41,6 +41,7 @@ new file mode 100644
 +const WEIGHT_DENOMINATOR: u8 = 20;
 +const MAX_ASSIST_ROUNDS: u8 = 3;
 +const NO_BENEFIT_ROUND: u8 = 2;
++const SAMPLE_MAX_AGE_ROUNDS: u8 = 1;
 +const MINIMUM_MODEL_GAIN_NUMERATOR: u64 = 102;
 +const MINIMUM_MODEL_GAIN_DENOMINATOR: u64 = 100;
 +const MAX_ASSIST_DURATION: Duration = Duration::from_millis(300);
@@ -73,6 +74,7 @@ new file mode 100644
 +    pub(crate) baseline_cwnd_bytes: usize,
 +    pub(crate) model_delivery_rate_bytes_per_second: u64,
 +    pub(crate) sample_valid: bool,
++    pub(crate) sample_age_rounds: u8,
 +    pub(crate) srtt: Duration,
 +    pub(crate) min_rtt: Duration,
 +    pub(crate) path_changed: bool,
@@ -281,6 +283,7 @@ new file mode 100644
 +            return (Some(BabrReasonCode::BbrPhaseProtected), false, false);
 +        }
 +        if !input.sample_valid ||
++            input.sample_age_rounds > SAMPLE_MAX_AGE_ROUNDS ||
 +            input.model_delivery_rate_bytes_per_second == 0
 +        {
 +            return (Some(BabrReasonCode::SampleInvalid), false, false);
@@ -535,6 +538,7 @@ new file mode 100644
 +            baseline_cwnd_bytes: 64_000,
 +            model_delivery_rate_bytes_per_second: 20_000_000,
 +            sample_valid: true,
++            sample_age_rounds: 0,
 +            srtt: Duration::from_millis(50),
 +            min_rtt: Duration::from_millis(50),
 +            path_changed: false,
@@ -565,6 +569,33 @@ new file mode 100644
 +            assert_eq!(d.final_cwnd_bytes, 64_000);
 +            assert!(!d.control_applied);
 +        }
++    }
++
++    #[test]
++    fn stale_delivery_sample_is_rejected_after_one_round() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.sample_age_rounds = SAMPLE_MAX_AGE_ROUNDS + 1;
++
++        let d = c.on_round(s);
++        assert_eq!(d.shadow_reason, BabrReasonCode::SampleInvalid);
++        assert_eq!(d.state, BabrLiteState::Baseline);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn one_round_old_delivery_sample_remains_eligible() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.sample_age_rounds = SAMPLE_MAX_AGE_ROUNDS;
++
++        let d = c.on_round(s);
++        assert_eq!(d.shadow_reason, BabrReasonCode::BoundedProbe);
++        assert_eq!(d.state, BabrLiteState::Assist);
 +    }
 +
 +    #[test]
