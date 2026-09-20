@@ -38,7 +38,7 @@ def snap(**kw):
 
 
 class P2ObserveTests(unittest.TestCase):
-    def test_contract_is_frozen_v3(self):
+    def test_contract_is_frozen_v4(self):
         contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
         self.assertEqual(contract["schema_version"], "p1-baseline-v4")
         self.assertEqual(
@@ -125,9 +125,35 @@ class P2ObserveTests(unittest.TestCase):
         self.assertEqual(d.reason, "POLICY_LIMITED")
         self.assertEqual(d.final_pacing, 20_000_000)
 
+    def test_target_hysteresis_preserves_state_in_band(self):
+        c = BabrReferenceController(rules(), Mode.LITE, target=25_000_000)
+
+        at_enter = c.on_round(snap(model_delivery_rate=20_000_000))
+        self.assertEqual(at_enter.state.value, "BASELINE")
+        self.assertEqual(at_enter.shadow_reason, "TARGET_NEAR")
+        self.assertAlmostEqual(at_enter.w, 0.0)
+
+        entered = c.on_round(
+            snap(now_ms=1, model_delivery_rate=19_000_000)
+        )
+        self.assertEqual(entered.state.value, "ASSIST")
+        self.assertAlmostEqual(entered.w, 0.05)
+
+        in_band = c.on_round(
+            snap(now_ms=20, model_delivery_rate=21_000_000)
+        )
+        self.assertEqual(in_band.state.value, "ASSIST")
+
+        exited = c.on_round(
+            snap(now_ms=40, model_delivery_rate=22_500_000)
+        )
+        self.assertEqual(exited.state.value, "BASELINE")
+        self.assertEqual(exited.shadow_reason, "TARGET_NEAR")
+        self.assertAlmostEqual(exited.w, 0.0)
+
     def test_l11_ack_frequency_does_not_advance_w(self):
         obs = BabrReferenceController(
-            rules(), Mode.OBSERVE, target=25_000_000
+            rules(), Mode.OBSERVE, target=26_000_000
         )
         for _ in range(1000):
             obs.on_ack()
@@ -142,7 +168,7 @@ class P2ObserveTests(unittest.TestCase):
 
     def test_observe_mode_change_does_not_leak_shadow_w(self):
         obs = BabrReferenceController(
-            rules(), Mode.OBSERVE, target=25_000_000
+            rules(), Mode.OBSERVE, target=26_000_000
         )
         obs.on_round(snap())
         self.assertAlmostEqual(obs.w, 0.05)
