@@ -13,7 +13,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
-@@ -0,0 +1,911 @@
+@@ -0,0 +1,912 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -625,6 +625,7 @@ new file mode 100644
 +
 +        let mut in_band = input(now + Duration::from_millis(20));
 +        in_band.model_delivery_rate_bytes_per_second = 21_000_000;
++        in_band.end_of_round_trip = false;
 +        let held = c.on_round(in_band);
 +        assert_eq!(held.state, BabrLiteState::Assist);
 +        assert_eq!(held.shadow_reason, BabrReasonCode::BoundedProbe);
