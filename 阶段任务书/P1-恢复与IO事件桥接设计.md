@@ -1,10 +1,10 @@
 # P1 恢复与 I/O 事件桥接设计
 
-版本：`p1-baseline-v3`；日期：2026-09-19；状态：Final Closure 宿主映射。
+版本：`p1-baseline-v4`；日期：2026-09-20；状态：Final Closure 宿主映射。
 
 ## 1. 目的
 
-本文件只负责把 `p1-baseline-v3` 的规范语义映射到固定宿主接口，不得覆盖或创造主规格规则。它闭环 `BBRv2::is_in_recovery()`、PTO、持续拥塞、ECN 和 socket 实际发送边界，但不在 P1 实现 BABR 控制器。
+本文件只负责把 `p1-baseline-v4` 的规范语义映射到固定宿主接口，不得覆盖或创造主规格规则。它闭环 `BBRv2::is_in_recovery()`、PTO、持续拥塞、ECN 和 socket 实际发送边界，但不在 P1 实现 BABR 控制器。
 
 固定宿主仍为 Cloudflare quiche 0.29.3，提交 `55886df3be579579207104c8e645825b6347a209`。源码审计确认：
 
