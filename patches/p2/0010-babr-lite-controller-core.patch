@@ -13,7 +13,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
-@@ -0,0 +1,744 @@
+@@ -0,0 +1,813 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -140,8 +140,16 @@ new file mode 100644
 +        }
 +    }
 +
-+    pub(crate) fn set_target_bytes_per_second(&mut self, target: u64) {
-+        self.target_bytes_per_second = target;
++    pub(crate) fn set_target_bytes_per_second(&mut self, target: u64) -> bool {
++        if target == 0 ||
++            (TARGET_MIN_BYTES_PER_SECOND..=TARGET_MAX_BYTES_PER_SECOND)
++                .contains(&target)
++        {
++            self.target_bytes_per_second = target;
++            true
++        } else {
++            false
++        }
 +    }
 +
 +    pub(crate) fn set_max_rate_bytes_per_second(&mut self, max_rate: Option<u64>) {
@@ -195,15 +203,23 @@ new file mode 100644
 +        &self, input: BabrLiteInput, reason: BabrReasonCode,
 +        shadow_reason: BabrReasonCode, soft_guard: bool, hard_guard: bool,
 +    ) -> BabrLiteDecision {
++        let baseline_pacing_rate_bytes_per_second =
++            self.max_rate_bytes_per_second.map_or(
++                input.baseline_pacing_rate_bytes_per_second,
++                |max_rate| {
++                    input.baseline_pacing_rate_bytes_per_second.min(max_rate)
++                },
++            );
++
 +        BabrLiteDecision {
 +            state: self.state,
 +            reason,
 +            shadow_reason,
 +            weight_steps: self.weight_steps,
 +            candidate_pacing_rate_bytes_per_second:
-+                input.baseline_pacing_rate_bytes_per_second,
++                baseline_pacing_rate_bytes_per_second,
 +            final_pacing_rate_bytes_per_second:
-+                input.baseline_pacing_rate_bytes_per_second,
++                baseline_pacing_rate_bytes_per_second,
 +            final_cwnd_bytes: input.baseline_cwnd_bytes,
 +            control_applied: false,
 +            soft_guard,
@@ -476,7 +492,17 @@ new file mode 100644
 +                WEIGHT_DENOMINATOR as u64,
 +        );
 +
-+        let control_applied = self.mode == BabrMode::Lite;
++        let baseline_pacing_rate_bytes_per_second =
++            self.max_rate_bytes_per_second.map_or(
++                input.baseline_pacing_rate_bytes_per_second,
++                |max_rate| {
++                    input.baseline_pacing_rate_bytes_per_second.min(max_rate)
++                },
++            );
++        // Frozen invariant: W=0 publishes the host BBR pacing output, not
++        // the frozen B_ref. A candidate may still be observed in shadow mode.
++        let control_applied =
++            self.mode == BabrMode::Lite && self.weight_steps > 0;
 +        BabrLiteDecision {
 +            state: self.state,
 +            reason: self.output_reason(reason),
@@ -486,7 +512,7 @@ new file mode 100644
 +            final_pacing_rate_bytes_per_second: if control_applied {
 +                candidate
 +            } else {
-+                input.baseline_pacing_rate_bytes_per_second
++                baseline_pacing_rate_bytes_per_second
 +            },
 +            final_cwnd_bytes: input.baseline_cwnd_bytes,
 +            control_applied,
@@ -539,6 +565,49 @@ new file mode 100644
 +            assert_eq!(d.final_cwnd_bytes, 64_000);
 +            assert!(!d.control_applied);
 +        }
++    }
++
++    #[test]
++    fn invalid_target_update_preserves_previous_valid_configuration() {
++        let mut c = controller(BabrMode::Lite);
++        assert_eq!(c.target_bytes_per_second, 25_000_000);
++
++        assert!(!c.set_target_bytes_per_second(999_999));
++        assert_eq!(c.target_bytes_per_second, 25_000_000);
++
++        assert!(!c.set_target_bytes_per_second(125_000_001));
++        assert_eq!(c.target_bytes_per_second, 25_000_000);
++
++        assert!(c.set_target_bytes_per_second(0));
++        assert_eq!(c.target_bytes_per_second, 0);
++    }
++
++    #[test]
++    fn max_rate_caps_baseline_even_when_assist_is_policy_limited() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.set_max_rate_bytes_per_second(Some(18_000_000));
++
++        let d = c.on_round(input(now));
++        assert_eq!(d.shadow_reason, BabrReasonCode::PolicyLimited);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 18_000_000);
++        assert_eq!(d.final_cwnd_bytes, 64_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn zero_weight_publishes_baseline_pacing_not_reference_rate() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.end_of_round_trip = false;
++        s.baseline_pacing_rate_bytes_per_second = 21_000_000;
++
++        let d = c.on_round(s);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(d.candidate_pacing_rate_bytes_per_second, 20_000_000);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 21_000_000);
++        assert!(!d.control_applied);
 +    }
 +
 +    #[test]
