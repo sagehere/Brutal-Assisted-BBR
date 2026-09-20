@@ -12,7 +12,7 @@ from pathlib import Path
 p = Path("阶段任务书/P1-冻结参数与用例.json")
 d = json.loads(p.read_text(encoding="utf-8"))
 
-assert d["schema_version"] == "p1-baseline-v3"
+assert d["schema_version"] == "p1-baseline-v4"
 assert d["scope"]["host"] == "Cloudflare quiche 0.29.3"
 assert d["scope"]["host_commit"] == "55886df3be579579207104c8e645825b6347a209"
 assert d["capabilities"]["bbr_is_in_recovery"] == "not_used"
