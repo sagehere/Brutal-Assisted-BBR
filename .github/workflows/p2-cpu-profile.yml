@@ -74,11 +74,11 @@ jobs:
       - name: Render perf reports
         if: always()
         run: |
+          sudo chown -R "$USER:$USER" 阶段任务书/p2-observe-cpu-profile-artifacts || true
           shopt -s nullglob
           for f in 阶段任务书/p2-observe-cpu-profile-artifacts/profile/*.data; do
-            sudo perf report --stdio --no-children -i "$f" > "$f.txt" || true
+            perf report --stdio --no-children -i "$f" > "$f.txt"
           done
-          sudo chown -R "$USER:$USER" 阶段任务书/p2-observe-cpu-profile-artifacts || true
 
       - name: Upload CPU profile evidence
         if: always()
