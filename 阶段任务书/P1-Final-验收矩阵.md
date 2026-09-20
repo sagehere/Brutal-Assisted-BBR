@@ -1,6 +1,6 @@
 # P1 Final 验收矩阵
 
-版本：`p1-baseline-v3`；日期：2026-09-19。
+版本：`p1-baseline-v4`；日期：2026-09-20。
 
 本矩阵把 01 任务书 §4 的“输入、事件序列、预期状态、输出及预算变化”转为可复核格式。C01-C09 继承原合成检查；C10-C15 是 Final Closure 新增检查。
 
@@ -20,7 +20,7 @@
 | C12 | deadline=300ms | now=299,300,301ms 分别尝试 admission | 299ms 可继续检查；300/301ms 禁止新 Assist | deadline grace=0；timer lateness 只遥测 |
 | C13 | 任意 decide 输出 | 收集所有 reason | 每个 reason 必须存在 reason_codes registry | registry 决定 clear_w/failure/backoff/sample |
 | C14 | 读取 machine contract | 检查必需参数与 provenance | 所有冻结参数都有确定值/公式和类别来源 | 缺字段即 Final Gate FAIL |
-| C15 | 扫描 normative spec/bridge/JSON | 检查 budget、guard、capability、version 关键词 | 不得存在“socket失败不扣预算”等过时冲突；v3 一致 | 发现冲突即 Final Gate FAIL |
+| C15 | 扫描 normative spec/bridge/JSON，并执行 Target 迟滞边界 | BASELINE: D=0.8T 保持基线；D<0.8T 可入 ASSIST；ASSIST: 0.8T<=D<0.9T 保持 ASSIST；D>=0.9T 退出 | 不得存在过时冲突；v4 一致；0.8/0.9 状态语义唯一 | 发现冲突即 Final Gate FAIL |
 
 ## Final G1 Exit
 
