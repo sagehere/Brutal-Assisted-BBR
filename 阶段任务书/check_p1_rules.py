@@ -261,7 +261,7 @@ def c07():
 
 def c08():
     result = decide(
-        base_event(model_delivery_rate=30_000_000),
+        base_event(target=40_000_000, model_delivery_rate=30_000_000),
         {"babr_state": "ASSIST", "rounds": 2, "reference_rate": 20_000_000},
     )
     assert result["state"] == "ASSIST"
@@ -343,6 +343,7 @@ def c15():
     assert CFG["configuration_version"] == "2026-09-20-p1-hysteresis-errata"
     assert CFG["normative_authority"]["behavior_spec"] == "P1-修订规格与冻结基线.md"
     assert CFG["target"]["hysteresis_band_behavior"] == "preserve_current_state"
+    assert CFG["target"]["delivery_signal"] == "model_delivery_rate"
 
     at_enter = decide(
         base_event(baseline_rate=20_000_000, model_delivery_rate=20_000_000, target=25_000_000),
