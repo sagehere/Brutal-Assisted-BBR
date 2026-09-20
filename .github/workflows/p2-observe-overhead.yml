@@ -19,7 +19,7 @@ on:
 jobs:
   overhead:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout with frozen host submodule
@@ -72,7 +72,7 @@ jobs:
           BABR_LOSS_PCT: "0"
           BABR_DATA_DIRECTION: "receiver_to_sender"
           BABR_P2_CPU_PAIRS: "20"
-          BABR_P2_CPU_CONNECTIONS_PER_SAMPLE: "4"
+          BABR_P2_CPU_CONNECTIONS_PER_SAMPLE: "6"
           BABR_P2_CPU_FLOW_BYTES: "268435456"
           BABR_P2_CPU_WARMUP_BYTES: "67108864"
           BABR_P2_CPU_LIMIT_RATIO: "0.02"
