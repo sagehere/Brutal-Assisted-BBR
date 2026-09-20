@@ -7,7 +7,7 @@ source "$HERE/common.sh"
 require_root
 require_cmds
 
-for cmd in ss stat python3 date; do
+for cmd in ss stat python3 date taskset; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "Missing required command: $cmd" >&2
     exit 93
@@ -26,6 +26,66 @@ OBSERVE_PORT="${BABR_P2_CPU_OBSERVE_PORT:-4434}"
 DATA_DIRECTION="${BABR_DATA_DIRECTION:-receiver_to_sender}"
 OUT="${BABR_P2_CPU_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-observe-cpu-artifacts}"
 CPU_LIMIT_RATIO="${BABR_P2_CPU_LIMIT_RATIO:-0.02}"
+
+CPU_PROFILE_PAIR="${BABR_P2_CPU_PROFILE_PAIR:-0}"
+CPU_PROFILE_MODE="${BABR_P2_CPU_PROFILE_MODE:-observe}"
+
+read_allowed_cpus() {
+  python3 - <<'PY'
+from pathlib import Path
+
+allowed = None
+for line in Path("/proc/self/status").read_text(encoding="utf-8").splitlines():
+    if line.startswith("Cpus_allowed_list:"):
+        allowed = line.split(":", 1)[1].strip()
+        break
+if not allowed:
+    raise SystemExit("unable to read Cpus_allowed_list")
+
+cpus = []
+for part in allowed.split(","):
+    if "-" in part:
+        start, end = map(int, part.split("-", 1))
+        cpus.extend(range(start, end + 1))
+    else:
+        cpus.append(int(part))
+print(" ".join(map(str, cpus)))
+PY
+}
+
+read -r -a ALLOWED_CPUS <<< "$(read_allowed_cpus)"
+if (( ${#ALLOWED_CPUS[@]} == 0 )); then
+  echo "No allowed CPUs discovered" >&2
+  exit 97
+fi
+
+SERVER_CPU="${BABR_P2_SERVER_CPU:-${ALLOWED_CPUS[0]}}"
+if (( ${#ALLOWED_CPUS[@]} >= 2 )); then
+  DEFAULT_CLIENT_CPU="${ALLOWED_CPUS[1]}"
+else
+  DEFAULT_CLIENT_CPU="${ALLOWED_CPUS[0]}"
+fi
+CLIENT_CPU="${BABR_P2_CLIENT_CPU:-$DEFAULT_CLIENT_CPU}"
+
+cpu_is_allowed() {
+  local needle="$1"
+  local cpu
+  for cpu in "${ALLOWED_CPUS[@]}"; do
+    if [[ "$cpu" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! cpu_is_allowed "$SERVER_CPU"; then
+  echo "Requested server CPU $SERVER_CPU is outside allowed set: ${ALLOWED_CPUS[*]}" >&2
+  exit 98
+fi
+if ! cpu_is_allowed "$CLIENT_CPU"; then
+  echo "Requested client CPU $CLIENT_CPU is outside allowed set: ${ALLOWED_CPUS[*]}" >&2
+  exit 99
+fi
 
 if (( PAIR_COUNT < 10 )); then
   echo "Persistent CPU gate requires at least 10 pairs; got $PAIR_COUNT" >&2
@@ -131,6 +191,51 @@ process_thread_count() {
   find "/proc/$pid/task" -mindepth 1 -maxdepth 1 -type d | wc -l
 }
 
+process_allowed_cpu_list() {
+  local pid="$1"
+  awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/status"
+}
+
+PROFILE_PID=""
+start_profile_if_requested() {
+  local mode="$1"
+  local pair="$2"
+  local pid="$3"
+
+  PROFILE_PID=""
+  if [[ "$CPU_PROFILE_PAIR" == "0" || "$pair" != "$CPU_PROFILE_PAIR" ]]; then
+    return 0
+  fi
+  if [[ "$CPU_PROFILE_MODE" != "both" && "$mode" != "$CPU_PROFILE_MODE" ]]; then
+    return 0
+  fi
+  if ! command -v perf >/dev/null 2>&1; then
+    echo "CPU profile requested but perf is unavailable" >&2
+    return 1
+  fi
+
+  mkdir -p "$OUT/profile"
+  perf record -q -F 99 -g -p "$pid" \
+    -o "$OUT/profile/${mode}-pair-${pair}.data" -- sleep 3600 &
+  PROFILE_PID=$!
+  sleep 0.2
+  if ! kill -0 "$PROFILE_PID" >/dev/null 2>&1; then
+    echo "perf failed to attach to $mode server pid $pid" >&2
+    wait "$PROFILE_PID" || true
+    PROFILE_PID=""
+    return 1
+  fi
+}
+
+stop_profile_if_running() {
+  if [[ -z "$PROFILE_PID" ]]; then
+    return 0
+  fi
+  kill -INT "$PROFILE_PID" >/dev/null 2>&1 || true
+  wait "$PROFILE_PID" || true
+  PROFILE_PID=""
+}
+
 start_server() {
   local mode="$1"
   local port="$2"
@@ -148,13 +253,20 @@ start_server() {
     server_env+=("BABR_OBSERVE_TELEMETRY_FILE=/dev/null")
   fi
 
-  python3 "$HERE/run_with_rusage.py"     --pid-file "$pid_file"     --metrics-file "$rusage_file"     --     ip netns exec "$NS_D" env "${server_env[@]}"     "$SERVER_BIN"       --address "$D_IP:$port"       --cc-algorithm bbr2       --enable-pacing     > "$dir/server.log" 2>&1 &
+  python3 "$HERE/run_with_rusage.py"     --pid-file "$pid_file"     --metrics-file "$rusage_file"     --     ip netns exec "$NS_D" env "${server_env[@]}"     taskset -c "$SERVER_CPU" "$SERVER_BIN"       --address "$D_IP:$port"       --cc-algorithm bbr2       --enable-pacing     > "$dir/server.log" 2>&1 &
 
   local wrapper_pid=$!
   wait_for_pid_file "$pid_file"
   local server_pid
   server_pid="$(cat "$pid_file")"
   wait_for_port "$port" "$server_pid"
+
+  local actual_affinity
+  actual_affinity="$(process_allowed_cpu_list "$server_pid")"
+  if [[ "$actual_affinity" != "$SERVER_CPU" ]]; then
+    echo "$mode server affinity mismatch: expected $SERVER_CPU got $actual_affinity" >&2
+    return 1
+  fi
 
   if [[ "$mode" == "off" ]]; then
     OFF_PID="$server_pid"
@@ -173,7 +285,7 @@ run_client() {
   rm -rf "$dir"
   mkdir -p "$dir/response"
 
-  ip netns exec "$NS_S" env RUST_LOG=warn     "$CLIENT_BIN"       "https://test.com/stream-bytes/$bytes"       --no-verify       --connect-to "$D_IP:$port"       --http-version HTTP/3       --max-data 2147483648       --max-window 2147483648       --max-stream-data 2147483648       --max-stream-window 2147483648       --idle-timeout 120000       --dump-responses "$dir/response"     > "$dir/client.log" 2>&1
+  ip netns exec "$NS_S" env RUST_LOG=warn     taskset -c "$CLIENT_CPU" "$CLIENT_BIN"       "https://test.com/stream-bytes/$bytes"       --no-verify       --connect-to "$D_IP:$port"       --http-version HTTP/3       --max-data 2147483648       --max-window 2147483648       --max-stream-data 2147483648       --max-stream-window 2147483648       --idle-timeout 120000       --dump-responses "$dir/response"     > "$dir/client.log" 2>&1
 
   local response="$dir/response/$bytes"
   if [[ ! -f "$response" ]]; then
@@ -211,6 +323,7 @@ run_sample() {
   threads_before="$(process_thread_count "$pid")"
   cpu_before="$(process_cpu_runtime_ns "$pid")"
   wall_start="$(date +%s%N)"
+  start_profile_if_requested "$mode" "$pair" "$pid"
 
   for n in $(seq 1 "$CONNECTIONS_PER_SAMPLE"); do
     run_client "$port" "$FLOW_BYTES" "$sample_dir/conn-$(printf '%02d' "$n")"
@@ -218,6 +331,7 @@ run_sample() {
 
   # Let final per-connection telemetry drains settle before the CPU snapshot.
   sleep 0.25
+  stop_profile_if_running
   wall_end="$(date +%s%N)"
   cpu_after="$(process_cpu_runtime_ns "$pid")"
   threads_after="$(process_thread_count "$pid")"
@@ -231,7 +345,7 @@ run_sample() {
     return 1
   fi
 
-  python3 -     "$mode" "$pair" "$CONNECTIONS_PER_SAMPLE" "$FLOW_BYTES"     "$cpu_before" "$cpu_after" "$wall_start" "$wall_end"     "$threads_before" "$sample_dir/metrics.json" <<'PY'
+  python3 -     "$mode" "$pair" "$CONNECTIONS_PER_SAMPLE" "$FLOW_BYTES"     "$cpu_before" "$cpu_after" "$wall_start" "$wall_end"     "$threads_before" "$SERVER_CPU" "$CLIENT_CPU" "$sample_dir/metrics.json" <<'PY'
 import json
 import sys
 
@@ -245,6 +359,8 @@ import sys
     wall_start_s,
     wall_end_s,
     threads_s,
+    server_cpu_s,
+    client_cpu_s,
     out_path,
 ) = sys.argv[1:]
 
@@ -263,6 +379,8 @@ metrics = {
     "server_cpu_seconds": cpu_seconds,
     "wall_seconds": wall_seconds,
     "server_threads": int(threads_s),
+    "server_cpu_affinity": int(server_cpu_s),
+    "client_cpu_affinity": int(client_cpu_s),
 }
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump(metrics, fh, indent=2, sort_keys=True)
@@ -275,6 +393,8 @@ PY
 
 bash "$HERE/setup.sh" >/dev/null
 BABR_DATA_DIRECTION="$DATA_DIRECTION" bash "$HERE/shape.sh" >/dev/null
+
+echo "Persistent CPU affinity: server=$SERVER_CPU client=$CLIENT_CPU allowed=${ALLOWED_CPUS[*]}"
 
 start_server off "$OFF_PORT"
 start_server observe "$OBSERVE_PORT"
@@ -324,6 +444,8 @@ for i in range(1, count + 1):
         "connections_per_sample": off["connections"],
         "total_payload_bytes_per_sample": off["total_payload_bytes"],
         "server_threads": off["server_threads"],
+        "server_cpu_affinity": off["server_cpu_affinity"],
+        "client_cpu_affinity": off["client_cpu_affinity"],
     })
 
 def nearest_rank_p(values, p):
@@ -338,6 +460,7 @@ summary = {
     "pairs": count,
     "metric": (
         "paired persistent-server scheduled CPU runtime; ABBA order; "
+        "Off/Observe pinned to the same server CPU; clients pinned separately; "
         "multiple connections per sample; startup/shutdown excluded"
     ),
     "p95_method": "nearest-rank",
