@@ -27,7 +27,8 @@
     "maximum_byte_per_s": 125000000,
     "enter_ratio": 0.8,
     "exit_ratio": 0.9,
-    "hysteresis_band_behavior": "preserve_current_state"
+    "hysteresis_band_behavior": "preserve_current_state",
+    "delivery_signal": "model_delivery_rate"
   },
   "assist": {
     "allowed_bbr_phase": [
