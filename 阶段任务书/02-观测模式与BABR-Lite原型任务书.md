@@ -1,6 +1,6 @@
 # 阶段 02：观测模式与 BABR-Lite 原型任务书
 
-版本：1.1；日期：2026-09-19；状态：实施中（Observe；Lite 未解锁）；预计投入：1–2 人周。  
+版本：1.1；日期：2026-09-19；状态：实施中（M2 Observe Gate 已通过；M3 Lite Core 实施中）；预计投入：1–2 人周。  
 依据：[评估报告 R2](../BABR规格审核与实施评估报告.md) §3–4；前置：[阶段 01](01-规格收敛与基线冻结任务书.md) G1 通过；共同约定见 [阶段总览](00-阶段总览与执行约定.md)。
 
 ## 1. 目标与范围
@@ -9,7 +9,7 @@
 
 只使用阶段 01 锁定的宿主、基线、参数和状态表。Lite 的目标候选为 T，随后仍须通过辅助增长、预算与宿主安全约束。保持基线 CWND 处理，不引入 `T/A`、独立窗口扩大、Adaptive Target、多路径或新的竞争检测。
 
-> 实施记录：2026-09-19 已建立 `p2-observe-lite`。M0/M1 已完成，真实 Off/Observe 网络长流已通过；当前 M2 仍因资源开销 Gate 未通过而锁定 Lite。Observe Gate 通过前不得启用 Lite 实际辅助发送。L03/L04/L05/L10 的实际辅助网络证据属于 Lite 实现后的 M4 Controlled Safety，不作为解锁 Lite 的循环前置。详见 [P2 实施记录与验收](P2-实施记录与验收.md)。
+> 实施记录：2026-09-20，M2 Observe Gate 已在 run `35491628800` 正式通过：CPU p95 1.7148%≤2%、memory p95 19,200 B/connection≤256 KiB、Log60 220,766 B/60s≤1 MiB；同 head 的 P1/Calibration/Observe/Real Observe 亦全部通过。Lite 因此正式解锁，M3 Lite Core 开始实施。L03/L04/L05/L10 的实际辅助网络证据仍属于 Lite 实现后的 M4 Controlled Safety。详见 [P2 实施记录与验收](P2-实施记录与验收.md)。
 
 ## 2. 开发任务
 
