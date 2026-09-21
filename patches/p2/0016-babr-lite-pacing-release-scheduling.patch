@@ -420,7 +420,7 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +    #[allow(clippy::too_many_arguments)]
      #[inline]
      pub fn on_congestion_event(
-@@ -370,10 +407,54 @@
+@@ -370,9 +407,53 @@
          let baseline_cwnd = pacer.get_congestion_window();
  
 -        assert_eq!(
@@ -481,7 +481,6 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +        assert_eq!(lite.get_congestion_window(), baseline_cwnd);
 +    }
 +}
- 
 diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
 --- a/quiche/src/recovery/gcongestion/babr_lite.rs
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
