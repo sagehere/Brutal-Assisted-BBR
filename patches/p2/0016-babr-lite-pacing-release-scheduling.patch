@@ -1,0 +1,508 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -583,9 +583,10 @@
+     babr_actual_socket_sent_bytes: u64,
+     babr_unique_payload_delivered_bytes: u64,
+-    babr_telemetry: BabrObserveTelemetry,
+-    babr_lite_controller: BabrLiteController,
+-    babr_lite_last_guards: BabrTransportGuardCounters,
+-
+-    pub bytes_lost: u64,
++    babr_telemetry: BabrObserveTelemetry,
++    babr_lite_controller: BabrLiteController,
++    babr_lite_last_guards: BabrTransportGuardCounters,
++    babr_lite_pacing_rate_bytes_per_second: Option<u64>,
++
++    pub bytes_lost: u64,
+ 
+     max_datagram_size: usize,
+@@ -653,15 +654,18 @@
+     }
+ 
+-    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
+-        if mode == BabrMode::Lite &&
+-            self.babr_lite_controller.mode() != BabrMode::Lite
+-        {
+-            // Off/Observe counters are historical baseline, not new Lite
+-            // events. Only guards after this transition may gate control.
+-            self.babr_lite_last_guards = self.babr_guard_counters;
+-        }
+-
+-        self.babr_lite_controller.set_mode(mode);
+-    }
++    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
++        if mode == BabrMode::Lite &&
++            self.babr_lite_controller.mode() != BabrMode::Lite
++        {
++            // Off/Observe counters are historical baseline, not new Lite
++            // events. Only guards after this transition may gate control.
++            self.babr_lite_last_guards = self.babr_guard_counters;
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++        } else if mode != BabrMode::Lite {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++        }
++
++        self.babr_lite_controller.set_mode(mode);
++    }
+ 
+     pub(crate) fn babr_set_lite_target_bytes_per_second(
+@@ -721,9 +725,27 @@
+         // Consume each transport guard generation at most once so one event
+         // cannot be replayed by later ACK callbacks.
+-        self.babr_lite_last_guards = guards;
+-        self.babr_lite_controller.on_round(input)
+-    }
+-
+-    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
++        self.babr_lite_last_guards = guards;
++        self.babr_lite_controller.on_round(input)
++    }
++
++    fn babr_lite_publish_pacing_decision(
++        &mut self, decision: BabrLiteDecision,
++    ) {
++        self.babr_lite_pacing_rate_bytes_per_second =
++            (self.babr_lite_controller.mode() == BabrMode::Lite)
++                .then_some(decision.output_pacing_rate_bytes_per_second());
++    }
++
++    fn babr_lite_refresh_pacing(&mut self, now: Instant) {
++        if self.babr_lite_controller.mode() != BabrMode::Lite {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++            return;
++        }
++
++        let decision = self.babr_lite_decide_current(now);
++        self.babr_lite_publish_pacing_decision(decision);
++    }
++
++    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
+         self.babr_telemetry
+             .set_enabled(enabled, self.babr_guard_counters);
+@@ -779,22 +801,31 @@
+     /// Path identity must come from the connection/path layer. Recovery does
+     /// not infer migration from RTT changes.
+-    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
+-        self.babr_guard_counters.record(
+-            BabrTransportGuardEvent::PathChanged { path_id },
+-        );
+-        self.babr_record_observe_telemetry_now();
+-    }
+-
+-    pub(crate) fn babr_on_receiver_limited(&mut self) {
+-        self.babr_guard_counters
+-            .record(BabrTransportGuardEvent::ReceiverLimited);
+-        self.babr_record_observe_telemetry_now();
+-    }
+-
+-    pub(crate) fn babr_on_policy_limited(&mut self) {
+-        self.babr_guard_counters
+-            .record(BabrTransportGuardEvent::PolicyLimited);
+-        self.babr_record_observe_telemetry_now();
+-    }
++    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
++        self.babr_guard_counters.record(
++            BabrTransportGuardEvent::PathChanged { path_id },
++        );
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(Instant::now());
++        }
++        self.babr_record_observe_telemetry_now();
++    }
++
++    pub(crate) fn babr_on_receiver_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::ReceiverLimited);
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(Instant::now());
++        }
++        self.babr_record_observe_telemetry_now();
++    }
++
++    pub(crate) fn babr_on_policy_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::PolicyLimited);
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(Instant::now());
++        }
++        self.babr_record_observe_telemetry_now();
++    }
+ 
+     pub fn new(recovery_config: &RecoveryConfig) -> Option<Self> {
+@@ -830,8 +861,9 @@
+             babr_actual_socket_sent_bytes: 0,
+             babr_unique_payload_delivered_bytes: 0,
+-            babr_telemetry: Default::default(),
+-            babr_lite_controller: Default::default(),
+-            babr_lite_last_guards: Default::default(),
+-            bytes_lost: 0,
++            babr_telemetry: Default::default(),
++            babr_lite_controller: Default::default(),
++            babr_lite_last_guards: Default::default(),
++            babr_lite_pacing_rate_bytes_per_second: None,
++            bytes_lost: 0,
+ 
+             max_datagram_size: recovery_config.max_send_udp_payload_size,
+@@ -1033,11 +1065,13 @@
+         handshake_status: HandshakeStatus, now: Instant, trace_id: &str,
+     ) {
+-        let time_sent = if self.time_sent_set_to_now {
+-            now
+-        } else {
+-            self.get_next_release_time().time(now).unwrap_or(now)
+-        };
+-
+-        let epoch = &mut self.epochs[epoch];
++        let time_sent = if self.time_sent_set_to_now {
++            now
++        } else {
++            self.get_next_release_time().time(now).unwrap_or(now)
++        };
++        let babr_lite_rate =
++            self.babr_lite_pacing_rate_bytes_per_second;
++
++        let epoch = &mut self.epochs[epoch];
+ 
+         let ack_eliciting = pkt.ack_eliciting;
+@@ -1077,15 +1111,27 @@
+         }
+ 
+-        if in_flight {
+-            self.pacer.on_packet_sent(
+-                time_sent,
+-                self.bytes_in_flight.get(),
+-                pkt_num,
+-                sent_bytes,
+-                pkt.has_data,
+-                &self.rtt_stats,
+-            );
+-
+-            self.bytes_in_flight.add(sent_bytes, now);
++        if in_flight {
++            if let Some(rate) = babr_lite_rate {
++                self.pacer.on_packet_sent_with_babr_lite_rate(
++                    time_sent,
++                    self.bytes_in_flight.get(),
++                    pkt_num,
++                    sent_bytes,
++                    pkt.has_data,
++                    rate,
++                    &self.rtt_stats,
++                );
++            } else {
++                self.pacer.on_packet_sent(
++                    time_sent,
++                    self.bytes_in_flight.get(),
++                    pkt_num,
++                    sent_bytes,
++                    pkt.has_data,
++                    &self.rtt_stats,
++                );
++            }
++
++            self.bytes_in_flight.add(sent_bytes, now);
+             epoch.pkts_in_flight += 1;
+             self.set_loss_detection_timer(handshake_status, time_sent);
+@@ -1175,17 +1221,20 @@
+         }
+ 
+-        self.pacer.on_congestion_event(
+-            update_rtt,
+-            prior_in_flight,
+-            self.bytes_in_flight.get(),
+-            now,
+-            &self.newly_acked,
+-            &self.lost_reuse,
+-            self.epochs[epoch].least_unacked(),
+-            &self.rtt_stats,
+-            &mut self.recovery_stats,
+-        );
+-
+-        self.babr_record_observe_telemetry(now);
++        self.pacer.on_congestion_event(
++            update_rtt,
++            prior_in_flight,
++            self.bytes_in_flight.get(),
++            now,
++            &self.newly_acked,
++            &self.lost_reuse,
++            self.epochs[epoch].least_unacked(),
++            &self.rtt_stats,
++            &mut self.recovery_stats,
++        );
++
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(now);
++        }
++        self.babr_record_observe_telemetry(now);
+ 
+         self.pto_count = 0;
+@@ -1225,17 +1274,20 @@
+             }
+ 
+-            self.pacer.on_congestion_event(
+-                false,
+-                prior_in_flight,
+-                self.bytes_in_flight.get(),
+-                now,
+-                &[],
+-                &self.lost_reuse,
+-                self.epochs[epoch].least_unacked(),
+-                &self.rtt_stats,
+-                &mut self.recovery_stats,
+-            );
+-
+-            self.babr_record_observe_telemetry(now);
++            self.pacer.on_congestion_event(
++                false,
++                prior_in_flight,
++                self.bytes_in_flight.get(),
++                now,
++                &[],
++                &self.lost_reuse,
++                self.epochs[epoch].least_unacked(),
++                &self.rtt_stats,
++                &mut self.recovery_stats,
++            );
++
++            if self.babr_lite_controller.mode() == BabrMode::Lite {
++                self.babr_lite_refresh_pacing(now);
++            }
++            self.babr_record_observe_telemetry(now);
+ 
+             self.lost_count += lost_packets;
+@@ -1268,10 +1320,13 @@
+ 
+         self.pto_count += 1;
+-        self.babr_guard_counters.record(
+-            BabrTransportGuardEvent::PtoFired {
+-                pto_count: self.pto_count,
+-            },
+-        );
+-        self.babr_record_observe_telemetry(now);
++        self.babr_guard_counters.record(
++            BabrTransportGuardEvent::PtoFired {
++                pto_count: self.pto_count,
++            },
++        );
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(now);
++        }
++        self.babr_record_observe_telemetry(now);
+ 
+ 
+@@ -1419,10 +1474,13 @@
+ 
+     // FIXME only used by gcongestion
+-    fn on_app_limited(&mut self) {
+-        self.babr_guard_counters
+-            .record(BabrTransportGuardEvent::AppLimited);
+-        self.babr_record_observe_telemetry_now();
+-        self.pacer.on_app_limited(self.bytes_in_flight.get())
+-    }
++    fn on_app_limited(&mut self) {
++        self.babr_guard_counters
++            .record(BabrTransportGuardEvent::AppLimited);
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing(Instant::now());
++        }
++        self.babr_record_observe_telemetry_now();
++        self.pacer.on_app_limited(self.bytes_in_flight.get())
++    }
+ 
+     #[cfg(test)]
+@@ -1951,10 +2009,48 @@
+         assert_eq!(first.shadow_reason.as_str(), "POLICY_LIMITED");
+ 
+-        let second = r.babr_lite_decide_current(Instant::now());
+-        assert_ne!(second.shadow_reason.as_str(), "POLICY_LIMITED");
+-    }
+-
+-    #[test]
+-    fn test_high_pto_count_no_panic() {
++        let second = r.babr_lite_decide_current(Instant::now());
++        assert_ne!(second.shadow_reason.as_str(), "POLICY_LIMITED");
++    }
++
++    #[test]
++    fn babr_lite_publishes_rate_only_while_lite_is_enabled() {
++        let mut r = new_babr_recovery();
++        assert!(r.babr_set_lite_target_bytes_per_second(26_000_000));
++        r.babr_set_lite_mode(BabrMode::Lite);
++
++        let decision = r.babr_lite_decide(BabrLiteInput {
++            now: Instant::now(),
++            phase: BabrBbrPhase::ProbeBwCruise,
++            end_of_round_trip: true,
++            baseline_pacing_rate_bytes_per_second: 20_000_000,
++            baseline_cwnd_bytes: 64_000,
++            model_delivery_rate_bytes_per_second: 20_000_000,
++            sample_valid: true,
++            sample_age_rounds: 0,
++            srtt: Duration::from_millis(50),
++            min_rtt: Duration::from_millis(50),
++            path_changed: false,
++            app_limited: false,
++            receiver_limited: false,
++            policy_limited: false,
++            loss_detected: false,
++            pto_fired: false,
++        });
++        assert!(decision.control_applied);
++        let expected = decision.output_pacing_rate_bytes_per_second();
++
++        r.babr_lite_publish_pacing_decision(decision);
++        assert_eq!(
++            r.babr_lite_pacing_rate_bytes_per_second,
++            Some(expected)
++        );
++        assert_eq!(decision.final_cwnd_bytes, 64_000);
++
++        r.babr_set_lite_mode(BabrMode::Observe);
++        assert_eq!(r.babr_lite_pacing_rate_bytes_per_second, None);
++    }
++
++    #[test]
++    fn test_high_pto_count_no_panic() {
+         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+         config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
+diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
+--- a/quiche/src/recovery/gcongestion/pacer.rs
++++ b/quiche/src/recovery/gcongestion/pacer.rs
+@@ -218,8 +218,45 @@
+         self.ideal_next_packet_send_time.inc(delay);
+         // Stop making up for lost time if underlying sender prevents sending.
+-        self.pacing_limited = self.sender.can_send(bytes_in_flight + bytes);
+-    }
+-
+-    #[allow(clippy::too_many_arguments)]
++        self.pacing_limited = self.sender.can_send(bytes_in_flight + bytes);
++    }
++
++    /// Lite-only packet accounting path. The normal Off/Observe caller keeps
++    /// using `on_packet_sent()` unchanged. We first execute that exact path,
++    /// then replace only the release-time increment with the already-authorized
++    /// Lite rate. BBRv2, CWND, burst/lumpy tokens and send permission remain
++    /// owned by the baseline path.
++    pub(crate) fn on_packet_sent_with_babr_lite_rate(
++        &mut self, sent_time: Instant, bytes_in_flight: usize,
++        packet_number: u64, bytes: usize, is_retransmissible: bool,
++        requested_rate_bytes_per_second: u64, rtt_stats: &RttStats,
++    ) {
++        let prior_release_time = self.ideal_next_packet_send_time;
++
++        self.on_packet_sent(
++            sent_time,
++            bytes_in_flight,
++            packet_number,
++            bytes,
++            is_retransmissible,
++            rtt_stats,
++        );
++
++        if !self.enabled ||
++            !is_retransmissible ||
++            self.ideal_next_packet_send_time == ReleaseTime::Immediate
++        {
++            return;
++        }
++
++        let delay = self
++            .babr_lite_effective_pacing_rate(requested_rate_bytes_per_second)
++            .transfer_time(bytes as u64);
++
++        self.ideal_next_packet_send_time = prior_release_time;
++        self.ideal_next_packet_send_time.set_max(sent_time);
++        self.ideal_next_packet_send_time.inc(delay);
++    }
++
++    #[allow(clippy::too_many_arguments)]
+     #[inline]
+     pub fn on_congestion_event(
+@@ -370,10 +407,54 @@
+         let baseline_cwnd = pacer.get_congestion_window();
+ 
+-        assert_eq!(
+-            pacer.babr_lite_effective_pacing_rate(10_000_000),
+-            host_max
+-        );
+-        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
+-    }
+-}
++        assert_eq!(
++            pacer.babr_lite_effective_pacing_rate(10_000_000),
++            host_max
++        );
++        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
++    }
++
++    #[test]
++    fn babr_lite_rate_changes_only_release_schedule() {
++        let rtt = rtt_stats();
++        let mut baseline = Pacer::new(true, sender(), None);
++        let mut lite = Pacer::new(true, sender(), None);
++        baseline.burst_tokens = 0;
++        lite.burst_tokens = 0;
++
++        let now = Instant::now();
++        let bytes_in_flight = 24_000;
++        let bytes = 1_200;
++        let baseline_cwnd = baseline.get_congestion_window();
++        let baseline_rate = baseline
++            .pacing_rate(bytes_in_flight + bytes, &rtt)
++            .to_bytes_per_second();
++        let requested = baseline_rate.saturating_mul(11) / 10;
++
++        baseline.on_packet_sent(
++            now,
++            bytes_in_flight,
++            1,
++            bytes,
++            true,
++            &rtt,
++        );
++        lite.on_packet_sent_with_babr_lite_rate(
++            now,
++            bytes_in_flight,
++            1,
++            bytes,
++            true,
++            requested,
++            &rtt,
++        );
++
++        let baseline_release =
++            baseline.get_next_release_time().time(now).unwrap();
++        let lite_release = lite.get_next_release_time().time(now).unwrap();
++
++        assert!(lite_release < baseline_release);
++        assert_eq!(baseline.get_congestion_window(), baseline_cwnd);
++        assert_eq!(lite.get_congestion_window(), baseline_cwnd);
++    }
++}
+ 
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -83,9 +83,15 @@
+     pub(crate) control_applied: bool,
+     pub(crate) soft_guard: bool,
+-    pub(crate) hard_guard: bool,
+-}
+-
+-#[derive(Debug)]
+-pub(crate) struct BabrLiteController {
++    pub(crate) hard_guard: bool,
++}
++
++impl BabrLiteDecision {
++    pub(crate) fn output_pacing_rate_bytes_per_second(&self) -> u64 {
++        self.final_pacing_rate_bytes_per_second
++    }
++}
++
++#[derive(Debug)]
++pub(crate) struct BabrLiteController {
+     mode: BabrMode,
+     target_bytes_per_second: u64,
