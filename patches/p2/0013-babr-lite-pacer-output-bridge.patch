@@ -1,7 +1,7 @@
 diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
 --- a/quiche/src/recovery/gcongestion/pacer.rs
 +++ b/quiche/src/recovery/gcongestion/pacer.rs
-@@ -68,6 +68,10 @@ pub struct Pacer {
+@@ -68,4 +68,8 @@ pub struct Pacer {
      /// Underlying sender
      sender: BBRv2,
 +    /// Optional BABR-Lite output-layer pacing override.
@@ -10,14 +10,14 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +    babr_lite_rate_override: Option<Bandwidth>,
      /// The maximum rate the [`Pacer`] will use.
      max_pacing_rate: Option<Bandwidth>,
-@@ -88,6 +92,7 @@ impl Pacer {
+@@ -88,5 +92,6 @@ impl Pacer {
          Pacer {
              enabled,
              sender: congestion,
 +            babr_lite_rate_override: None,
              max_pacing_rate,
              burst_tokens: INITIAL_UNPACED_BURST,
-@@ -101,6 +106,16 @@ impl Pacer {
+@@ -101,5 +106,16 @@ impl Pacer {
      pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
          self.sender.babr_observe_snapshot()
      }
@@ -49,7 +49,7 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +            _ => effective_rate,
          }
      }
-@@ -298,3 +316,67 @@ impl Pacer {
+@@ -298,3 +316,64 @@ impl Pacer {
          !self.pacing_limited && self.sender.is_cwnd_limited(bytes_in_flight)
      }
  }
