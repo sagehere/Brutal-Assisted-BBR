@@ -295,7 +295,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  
              max_datagram_size: recovery_config.max_send_udp_payload_size,
              time_sent_set_to_now: cc.time_sent_set_to_now(),
-@@ -1880,11 +1930,31 @@
+@@ -1880,11 +1930,33 @@
              transport_outputs,
          );
  
@@ -320,8 +320,10 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +        let historical = r.babr_lite_decide_current(Instant::now());
 +        assert_ne!(historical.shadow_reason.as_str(), "POLICY_LIMITED");
 +
-+        // A new event is visible exactly once.
-+        r.babr_on_policy_limited();
++        // Inject directly so this test verifies decide_current() consumption
++        // independently from M3.2c's immediate guard refresh helper.
++        r.babr_guard_counters
++            .record(BabrTransportGuardEvent::PolicyLimited);
 +        let first = r.babr_lite_decide_current(Instant::now());
 +        assert_eq!(first.shadow_reason.as_str(), "POLICY_LIMITED");
 +
