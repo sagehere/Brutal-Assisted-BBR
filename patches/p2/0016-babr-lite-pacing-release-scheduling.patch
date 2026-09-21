@@ -442,8 +442,8 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +        let rtt = rtt_stats();
 +        let mut baseline = Pacer::new(true, sender(), None);
 +        let mut lite = Pacer::new(true, sender(), None);
-+        baseline.burst_tokens = 0;
-+        lite.burst_tokens = 0;
++        let _ = std::mem::take(&mut baseline.burst_tokens);
++        let _ = std::mem::take(&mut lite.burst_tokens);
 +
 +        let now = Instant::now();
 +        let bytes_in_flight = 24_000;
