@@ -1,0 +1,336 @@
+diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
+--- a/quiche/src/recovery/gcongestion/bbr2.rs
++++ b/quiche/src/recovery/gcongestion/bbr2.rs
+@@ -110,7 +110,9 @@
+     pub(crate) baseline_pacing_rate_bytes_per_second: u64,
+     pub(crate) baseline_cwnd_bytes: usize,
+-    pub(crate) model_delivery_rate_bytes_per_second: u64,
+-    pub(crate) delivery_sample_valid: bool,
+-    pub(crate) sample_max_bandwidth_bytes_per_second: Option<u64>,
++    pub(crate) model_delivery_rate_bytes_per_second: u64,
++    pub(crate) delivery_sample_valid: bool,
++    pub(crate) delivery_sample_generation: u64,
++    pub(crate) sample_age_rounds: u8,
++    pub(crate) sample_max_bandwidth_bytes_per_second: Option<u64>,
+     pub(crate) sample_min_rtt_micros: Option<u64>,
+     pub(crate) sample_is_app_limited: bool,
+@@ -501,7 +503,9 @@
+     babr_last_end_of_round_trip: bool,
+     babr_last_sample_max_bandwidth: Option<Bandwidth>,
+-    babr_last_sample_min_rtt: Option<Duration>,
+-    babr_last_delivery_sample_valid: bool,
+-    babr_last_loss_detected: bool,
++    babr_last_sample_min_rtt: Option<Duration>,
++    babr_last_delivery_sample_valid: bool,
++    babr_delivery_sample_generation: u64,
++    babr_delivery_sample_age_rounds: u8,
++    babr_last_loss_detected: bool,
+     params: Params,
+ }
+@@ -591,7 +595,9 @@
+             babr_last_end_of_round_trip: false,
+             babr_last_sample_max_bandwidth: None,
+-            babr_last_sample_min_rtt: None,
+-            babr_last_delivery_sample_valid: false,
+-            babr_last_loss_detected: false,
++            babr_last_sample_min_rtt: None,
++            babr_last_delivery_sample_valid: false,
++            babr_delivery_sample_generation: 0,
++            babr_delivery_sample_age_rounds: u8::MAX,
++            babr_last_loss_detected: false,
+             mss: max_segment_size,
+             params,
+@@ -603,10 +609,33 @@
+     }
+ 
+ 
+-    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
+-        self.babr_last_end_of_round_trip
+-    }
+-
+-    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
++    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
++        self.babr_last_end_of_round_trip
++    }
++
++    fn babr_update_delivery_sample_freshness(
++        &mut self, sample_max_bandwidth: Option<Bandwidth>,
++        sample_min_rtt: Option<Duration>, end_of_round_trip: bool,
++    ) {
++        if let Some(sample_max_bandwidth) = sample_max_bandwidth {
++            self.babr_last_sample_max_bandwidth = Some(sample_max_bandwidth);
++            self.babr_last_sample_min_rtt = sample_min_rtt;
++            self.babr_last_delivery_sample_valid = true;
++            self.babr_delivery_sample_generation =
++                self.babr_delivery_sample_generation.saturating_add(1);
++            self.babr_delivery_sample_age_rounds = 0;
++            return;
++        }
++
++        if end_of_round_trip {
++            self.babr_delivery_sample_age_rounds =
++                self.babr_delivery_sample_age_rounds.saturating_add(1);
++            self.babr_last_delivery_sample_valid =
++                self.babr_last_sample_max_bandwidth.is_some() &&
++                self.babr_delivery_sample_age_rounds <= 1;
++        }
++    }
++
++    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+         let phase = match &self.mode {
+             Mode::Startup(_) => BabrBbrPhase::Startup,
+@@ -634,9 +663,11 @@
+                 .network_model()
+                 .bandwidth_estimate()
+                 .to_bytes_per_second(),
+-            delivery_sample_valid: self.babr_last_delivery_sample_valid,
+-            sample_max_bandwidth_bytes_per_second: self
+-                .babr_last_sample_max_bandwidth
+-                .map(Bandwidth::to_bytes_per_second),
++            delivery_sample_valid: self.babr_last_delivery_sample_valid,
++            delivery_sample_generation: self.babr_delivery_sample_generation,
++            sample_age_rounds: self.babr_delivery_sample_age_rounds,
++            sample_max_bandwidth_bytes_per_second: self
++                .babr_last_sample_max_bandwidth
++                .map(Bandwidth::to_bytes_per_second),
+             sample_min_rtt_micros: self.babr_last_sample_min_rtt.map(|rtt| {
+                 rtt.as_micros().min(u64::MAX as u128) as u64
+@@ -844,12 +875,12 @@
+             self.has_non_app_limited_sample = true;
+         }
+ 
+-        self.babr_last_end_of_round_trip = congestion_event.end_of_round_trip;
+-        self.babr_last_sample_max_bandwidth =
+-            congestion_event.sample_max_bandwidth;
+-        self.babr_last_sample_min_rtt = congestion_event.sample_min_rtt;
+-        self.babr_last_delivery_sample_valid =
+-            congestion_event.sample_max_bandwidth.is_some();
+-        self.babr_last_loss_detected = !lost_packets.is_empty();
++        self.babr_last_end_of_round_trip = congestion_event.end_of_round_trip;
++        self.babr_update_delivery_sample_freshness(
++            congestion_event.sample_max_bandwidth,
++            congestion_event.sample_min_rtt,
++            congestion_event.end_of_round_trip,
++        );
++        self.babr_last_loss_detected = !lost_packets.is_empty();
+         if congestion_event.bytes_in_flight == 0 &&
+             self.params.avoid_unnecessary_probe_rtt
+@@ -999,10 +1030,48 @@
+             INIT_WINDOW_PACKETS * INIT_PACKET_SIZE
+         );
+-        assert!(!snapshot.delivery_sample_valid);
+-        assert!(!snapshot.loss_detected);
+-    }
+-
+-    #[test]
+-    fn babr_observe_phase_whitelist_matches_frozen_contract() {
++        assert!(!snapshot.delivery_sample_valid);
++        assert_eq!(snapshot.delivery_sample_generation, 0);
++        assert_eq!(snapshot.sample_age_rounds, u8::MAX);
++        assert!(!snapshot.loss_detected);
++    }
++
++    #[test]
++    fn babr_delivery_sample_age_uses_bbr_round_clock() {
++        const INIT_PACKET_SIZE: usize = 1200;
++        const INIT_WINDOW_PACKETS: usize = 10;
++        const MAX_WINDOW_PACKETS: usize = 10000;
++        let mut bbr2 = BBRv2::new(
++            INIT_WINDOW_PACKETS,
++            MAX_WINDOW_PACKETS,
++            INIT_PACKET_SIZE,
++            Duration::from_millis(100),
++            None,
++        );
++
++        bbr2.babr_update_delivery_sample_freshness(
++            Some(Bandwidth::from_bytes_per_second(20_000_000)),
++            Some(Duration::from_millis(40)),
++            false,
++        );
++        let fresh = bbr2.babr_observe_snapshot();
++        assert!(fresh.delivery_sample_valid);
++        assert_eq!(fresh.delivery_sample_generation, 1);
++        assert_eq!(fresh.sample_age_rounds, 0);
++
++        bbr2.babr_update_delivery_sample_freshness(None, None, true);
++        let one_round_old = bbr2.babr_observe_snapshot();
++        assert!(one_round_old.delivery_sample_valid);
++        assert_eq!(one_round_old.delivery_sample_generation, 1);
++        assert_eq!(one_round_old.sample_age_rounds, 1);
++
++        bbr2.babr_update_delivery_sample_freshness(None, None, true);
++        let stale = bbr2.babr_observe_snapshot();
++        assert!(!stale.delivery_sample_valid);
++        assert_eq!(stale.delivery_sample_generation, 1);
++        assert_eq!(stale.sample_age_rounds, 2);
++    }
++
++    #[test]
++    fn babr_observe_phase_whitelist_matches_frozen_contract() {
+         assert!(BabrBbrPhase::ProbeBwRefill.assist_allowed());
+         assert!(BabrBbrPhase::ProbeBwUp.assist_allowed());
+diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+--- a/quiche/src/recovery/gcongestion/babr_telemetry.rs
++++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+@@ -422,7 +422,9 @@
+                 baseline_pacing_rate_bytes_per_second: u64::MAX - 1,
+                 baseline_cwnd_bytes: 64_000,
+-                model_delivery_rate_bytes_per_second: u64::MAX - 2,
+-                delivery_sample_valid: true,
+-                sample_max_bandwidth_bytes_per_second: Some(20_000_000),
++                model_delivery_rate_bytes_per_second: u64::MAX - 2,
++                delivery_sample_valid: true,
++                delivery_sample_generation: 1,
++                sample_age_rounds: 0,
++                sample_max_bandwidth_bytes_per_second: Some(20_000_000),
+                 sample_min_rtt_micros: Some(50_000),
+                 sample_is_app_limited: false,
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -583,8 +583,9 @@
+     babr_actual_socket_sent_bytes: u64,
+     babr_unique_payload_delivered_bytes: u64,
+-    babr_telemetry: BabrObserveTelemetry,
+-    babr_lite_controller: BabrLiteController,
+-
+-    pub bytes_lost: u64,
++    babr_telemetry: BabrObserveTelemetry,
++    babr_lite_controller: BabrLiteController,
++    babr_lite_last_guards: BabrTransportGuardCounters,
++
++    pub bytes_lost: u64,
+     max_datagram_size: usize,
+     time_sent_set_to_now: bool,
+@@ -652,9 +653,17 @@
+     }
+ 
+ 
+-    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
+-        self.babr_lite_controller.set_mode(mode);
+-    }
++    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
++        if mode == BabrMode::Lite &&
++            self.babr_lite_controller.mode() != BabrMode::Lite
++        {
++            // Off/Observe counters are historical baseline, not new Lite
++            // events. Only guards after this transition may gate control.
++            self.babr_lite_last_guards = self.babr_guard_counters;
++        }
++
++        self.babr_lite_controller.set_mode(mode);
++    }
+ 
+     pub(crate) fn babr_set_lite_target_bytes_per_second(
+         &mut self, target: u64,
+@@ -670,12 +679,52 @@
+     }
+ 
+ 
+-    pub(crate) fn babr_lite_decide(
+-        &mut self, input: BabrLiteInput,
+-    ) -> BabrLiteDecision {
+-        self.babr_lite_controller.on_round(input)
+-    }
+-
+-    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
++    pub(crate) fn babr_lite_decide(
++        &mut self, input: BabrLiteInput,
++    ) -> BabrLiteDecision {
++        self.babr_lite_controller.on_round(input)
++    }
++
++    pub(crate) fn babr_lite_decide_current(
++        &mut self, now: Instant,
++    ) -> BabrLiteDecision {
++        let snapshot = self.babr_observe_snapshot();
++        let bbr = snapshot.bbr;
++        let guards = snapshot.guards;
++        let previous = self.babr_lite_last_guards;
++        let min_rtt = self.rtt_stats.min_rtt();
++
++        let input = BabrLiteInput {
++            now,
++            phase: bbr.phase,
++            end_of_round_trip: bbr.end_of_round_trip,
++            baseline_pacing_rate_bytes_per_second:
++                bbr.baseline_pacing_rate_bytes_per_second,
++            baseline_cwnd_bytes: bbr.baseline_cwnd_bytes,
++            model_delivery_rate_bytes_per_second:
++                bbr.model_delivery_rate_bytes_per_second,
++            sample_valid: bbr.delivery_sample_valid && min_rtt.is_some(),
++            sample_age_rounds: bbr.sample_age_rounds,
++            srtt: self.rtt_stats.rtt(),
++            min_rtt: min_rtt.unwrap_or_else(|| self.rtt_stats.rtt()),
++            path_changed:
++                guards.path_changed_events > previous.path_changed_events,
++            app_limited: bbr.sample_is_app_limited ||
++                guards.app_limited_events > previous.app_limited_events,
++            receiver_limited: guards.receiver_limited_events >
++                previous.receiver_limited_events,
++            policy_limited:
++                guards.policy_limited_events > previous.policy_limited_events,
++            loss_detected: guards.loss_events > previous.loss_events,
++            pto_fired: guards.pto_events > previous.pto_events,
++        };
++
++        // Consume each transport guard generation at most once so one event
++        // cannot be replayed by later ACK callbacks.
++        self.babr_lite_last_guards = guards;
++        self.babr_lite_controller.on_round(input)
++    }
++
++    pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
+         self.babr_telemetry
+             .set_enabled(enabled, self.babr_guard_counters);
+@@ -781,8 +830,9 @@
+             babr_actual_socket_sent_bytes: 0,
+             babr_unique_payload_delivered_bytes: 0,
+-            babr_telemetry: Default::default(),
+-            babr_lite_controller: Default::default(),
+-            bytes_lost: 0,
++            babr_telemetry: Default::default(),
++            babr_lite_controller: Default::default(),
++            babr_lite_last_guards: Default::default(),
++            bytes_lost: 0,
+ 
+             max_datagram_size: recovery_config.max_send_udp_payload_size,
+             time_sent_set_to_now: cc.time_sent_set_to_now(),
+@@ -1881,10 +1931,30 @@
+             transport_outputs,
+         );
+-        r.babr_set_lite_mode(BabrMode::Off);
+-        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
+-    }
+-
+-    #[test]
+-    fn test_high_pto_count_no_panic() {
++        r.babr_set_lite_mode(BabrMode::Off);
++        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
++    }
++
++    #[test]
++    fn babr_lite_current_mapping_consumes_only_new_guard_events() {
++        let mut r = new_babr_recovery();
++        assert!(r.babr_set_lite_target_bytes_per_second(26_000_000));
++
++        // An event before Lite enable is historical baseline.
++        r.babr_on_policy_limited();
++        r.babr_set_lite_mode(BabrMode::Lite);
++        let historical = r.babr_lite_decide_current(Instant::now());
++        assert_ne!(historical.shadow_reason.as_str(), "POLICY_LIMITED");
++
++        // A new event is visible exactly once.
++        r.babr_on_policy_limited();
++        let first = r.babr_lite_decide_current(Instant::now());
++        assert_eq!(first.shadow_reason.as_str(), "POLICY_LIMITED");
++
++        let second = r.babr_lite_decide_current(Instant::now());
++        assert_ne!(second.shadow_reason.as_str(), "POLICY_LIMITED");
++    }
++
++    #[test]
++    fn test_high_pto_count_no_panic() {
+         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+         config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
