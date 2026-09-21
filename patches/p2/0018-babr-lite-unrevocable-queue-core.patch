@@ -1,0 +1,307 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -25,7 +25,8 @@
+ 
+ // W advances by exactly 0.05 per BBR packet-timed round.
+ const WEIGHT_DENOMINATOR: u8 = 20;
+-const MAX_ASSIST_ROUNDS: u8 = 3;
++const MAX_ASSIST_ROUNDS: u8 = 3;
++const MAX_UNREVOCABLE_QUEUE_BYTES: u64 = 2_400;
+ const NO_BENEFIT_ROUND: u8 = 2;
+ const SAMPLE_MAX_AGE_ROUNDS: u8 = 1;
+ const MINIMUM_MODEL_GAIN_NUMERATOR: u64 = 102;
+@@ -108,9 +109,10 @@
+     rounds: u8,
+     reference_rate_bytes_per_second: Option<u64>,
+     assist_deadline: Option<Instant>,
+-    assist_budget_bytes: u64,
+-    assist_budget_debit_bytes: u64,
+-    failure_count: u32,
++    assist_budget_bytes: u64,
++    assist_budget_debit_bytes: u64,
++    assist_unrevocable_queue_bytes: u64,
++    failure_count: u32,
+     backoff_deadline: Option<Instant>,
+ }
+ 
+@@ -125,9 +127,10 @@
+             rounds: 0,
+             reference_rate_bytes_per_second: None,
+             assist_deadline: None,
+-            assist_budget_bytes: 0,
+-            assist_budget_debit_bytes: 0,
+-            failure_count: 0,
++            assist_budget_bytes: 0,
++            assist_budget_debit_bytes: 0,
++            assist_unrevocable_queue_bytes: 0,
++            failure_count: 0,
+             backoff_deadline: None,
+         }
+     }
+@@ -240,9 +243,17 @@
+         None
+     }
+ 
+-    pub(crate) fn on_send_entry(
+-        &mut self, now: Instant,
+-    ) -> Option<BabrReasonCode> {
++    pub(crate) fn assist_queue_has_room(&self) -> bool {
++        self.assist_unrevocable_queue_bytes < MAX_UNREVOCABLE_QUEUE_BYTES
++    }
++
++    pub(crate) fn resolve_unrevocable_queue(&mut self) {
++        self.assist_unrevocable_queue_bytes = 0;
++    }
++
++    pub(crate) fn on_send_entry(
++        &mut self, now: Instant,
++    ) -> Option<BabrReasonCode> {
+         if let Some(reason) = self.on_deadline_timer(now) {
+             return Some(reason);
+         }
+@@ -281,16 +292,27 @@
+         let remaining = self
+             .assist_budget_bytes
+             .saturating_sub(self.assist_budget_debit_bytes);
+-        if charge > remaining {
+-            self.enter_backoff(now);
+-            return BabrLiteAdmission::Withdraw(
+-                BabrReasonCode::AssistBudgetExhausted,
+-            );
+-        }
+-
+-        self.assist_budget_debit_bytes =
+-            self.assist_budget_debit_bytes.saturating_add(charge);
+-        BabrLiteAdmission::Assist
++        if charge > remaining {
++            self.enter_backoff(now);
++            return BabrLiteAdmission::Withdraw(
++                BabrReasonCode::AssistBudgetExhausted,
++            );
++        }
++
++        if self
++            .assist_unrevocable_queue_bytes
++            .saturating_add(charge) >
++            MAX_UNREVOCABLE_QUEUE_BYTES
++        {
++            return BabrLiteAdmission::Baseline;
++        }
++
++        self.assist_budget_debit_bytes =
++            self.assist_budget_debit_bytes.saturating_add(charge);
++        self.assist_unrevocable_queue_bytes = self
++            .assist_unrevocable_queue_bytes
++            .saturating_add(charge);
++        BabrLiteAdmission::Assist
+     }
+ 
+     fn baseline_decision(
+@@ -1004,8 +1026,76 @@
+         assert_eq!(c.assist_budget_debit_bytes, 0);
+     }
+ 
+-    #[test]
+-    fn hard_queue_delay_forces_baseline() {
++    #[test]
++    fn unrevocable_queue_blocks_only_current_batch_without_backoff() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        assert!(!c.assist_queue_has_room());
++        assert_eq!(c.assist_unrevocable_queue_bytes, 2_400);
++        assert_eq!(c.assist_budget_debit_bytes, 2_400);
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1),
++            BabrLiteAdmission::Baseline,
++        );
++        assert_eq!(c.state, BabrLiteState::Assist);
++        assert_eq!(c.failure_count, 0);
++        assert_eq!(c.assist_budget_debit_bytes, 2_400);
++    }
++
++    #[test]
++    fn resolving_socket_batch_never_refunds_execution_budget() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        assert_eq!(c.assist_budget_debit_bytes, 1_200);
++        assert_eq!(c.assist_unrevocable_queue_bytes, 1_200);
++
++        c.resolve_unrevocable_queue();
++        assert_eq!(c.assist_unrevocable_queue_bytes, 0);
++        assert_eq!(c.assist_budget_debit_bytes, 1_200);
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        assert_eq!(c.assist_budget_debit_bytes, 2_400);
++    }
++
++    #[test]
++    fn controller_state_changes_do_not_forge_socket_resolution() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++
++        c.set_mode(BabrMode::Off);
++        assert_eq!(c.assist_unrevocable_queue_bytes, 1_200);
++
++        c.resolve_unrevocable_queue();
++        assert_eq!(c.assist_unrevocable_queue_bytes, 0);
++    }
++
++    #[test]
++    fn hard_queue_delay_forces_baseline() {
+         let now = Instant::now();
+         let mut c = controller(BabrMode::Lite);
+         let mut s = input(now);
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -585,10 +585,11 @@
+     babr_unique_payload_delivered_bytes: u64,
+     babr_telemetry: BabrObserveTelemetry,
+     babr_lite_controller: BabrLiteController,
+-    babr_lite_last_guards: BabrTransportGuardCounters,
+-    babr_lite_pacing_rate_bytes_per_second: Option<u64>,
+-
+-    pub bytes_lost: u64,
++    babr_lite_last_guards: BabrTransportGuardCounters,
++    babr_lite_pacing_rate_bytes_per_second: Option<u64>,
++    babr_lite_next_packet_admitted: bool,
++
++    pub bytes_lost: u64,
+ 
+     max_datagram_size: usize,
+     time_sent_set_to_now: bool,
+@@ -733,9 +734,10 @@
+         self.babr_lite_controller.lite_deadline()
+     }
+ 
+-    pub(crate) fn babr_lite_assist_active(&self) -> bool {
+-        self.babr_lite_pacing_rate_bytes_per_second.is_some()
+-    }
++    pub(crate) fn babr_lite_assist_active(&self) -> bool {
++        self.babr_lite_pacing_rate_bytes_per_second.is_some() &&
++            self.babr_lite_controller.assist_queue_has_room()
++    }
+ 
+     pub(crate) fn babr_lite_on_deadline_timer(&mut self, now: Instant) {
+         if self
+@@ -747,11 +749,13 @@
+         }
+     }
+ 
+-    pub(crate) fn babr_lite_on_send_entry(&mut self, now: Instant) {
+-        if self.babr_lite_controller.on_send_entry(now).is_some() {
+-            self.babr_lite_pacing_rate_bytes_per_second = None;
+-        }
+-    }
++    pub(crate) fn babr_lite_on_send_entry(&mut self, now: Instant) {
++        self.babr_lite_next_packet_admitted = false;
++
++        if self.babr_lite_controller.on_send_entry(now).is_some() {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++        }
++    }
+ 
+     pub(crate) fn babr_lite_admit_generated_datagram(
+         &mut self, now: Instant, wire_bytes: usize,
+@@ -759,18 +763,31 @@
+         match self
+             .babr_lite_controller
+             .admit_generated_datagram(now, wire_bytes)
+-        {
+-            BabrLiteAdmission::Assist => true,
+-
+-            BabrLiteAdmission::Baseline |
+-            BabrLiteAdmission::Withdraw(_) => {
+-                self.babr_lite_pacing_rate_bytes_per_second = None;
+-                false
+-            },
+-        }
+-    }
+-
+-    fn babr_lite_publish_pacing_decision(
++        {
++            BabrLiteAdmission::Assist => {
++                self.babr_lite_next_packet_admitted = true;
++                true
++            },
++
++            BabrLiteAdmission::Baseline => {
++                self.babr_lite_next_packet_admitted = false;
++                false
++            },
++
++            BabrLiteAdmission::Withdraw(_) => {
++                self.babr_lite_next_packet_admitted = false;
++                self.babr_lite_pacing_rate_bytes_per_second = None;
++                false
++            },
++        }
++    }
++
++    pub(crate) fn babr_lite_resolve_unrevocable_queue(&mut self) {
++        self.babr_lite_next_packet_admitted = false;
++        self.babr_lite_controller.resolve_unrevocable_queue();
++    }
++
++    fn babr_lite_publish_pacing_decision(
+         &mut self, decision: BabrLiteDecision,
+     ) {
+         self.babr_lite_pacing_rate_bytes_per_second =
+@@ -905,9 +922,10 @@
+             babr_unique_payload_delivered_bytes: 0,
+             babr_telemetry: Default::default(),
+             babr_lite_controller: Default::default(),
+-            babr_lite_last_guards: Default::default(),
+-            babr_lite_pacing_rate_bytes_per_second: None,
+-            bytes_lost: 0,
++            babr_lite_last_guards: Default::default(),
++            babr_lite_pacing_rate_bytes_per_second: None,
++            babr_lite_next_packet_admitted: false,
++            bytes_lost: 0,
+ 
+             max_datagram_size: recovery_config.max_send_udp_payload_size,
+             time_sent_set_to_now: cc.time_sent_set_to_now(),
+@@ -1112,10 +1130,13 @@
+         } else {
+             self.get_next_release_time().time(now).unwrap_or(now)
+         };
+-        let babr_lite_rate =
+-            self.babr_lite_pacing_rate_bytes_per_second;
+-
+-        let epoch = &mut self.epochs[epoch];
++        let babr_lite_rate = self
++            .babr_lite_next_packet_admitted
++            .then_some(self.babr_lite_pacing_rate_bytes_per_second)
++            .flatten();
++        self.babr_lite_next_packet_admitted = false;
++
++        let epoch = &mut self.epochs[epoch];
+ 
+         let ack_eliciting = pkt.ack_eliciting;
+         let in_flight = pkt.in_flight;
