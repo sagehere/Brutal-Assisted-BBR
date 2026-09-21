@@ -355,7 +355,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  use super::babr_lite::BabrLiteInput;
  use super::babr_lite::BabrMode;
  use super::babr_telemetry::BabrObserveTelemetry;
-@@ -724,11 +725,52 @@
+@@ -724,16 +725,58 @@
  
          // Consume each transport guard generation at most once so one event
          // cannot be replayed by later ACK callbacks.
@@ -364,6 +364,12 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 -    }
 -
 -    fn babr_lite_publish_pacing_decision(
+-        &mut self, decision: BabrLiteDecision,
+-    ) {
+-        self.babr_lite_pacing_rate_bytes_per_second =
+-            (self.babr_lite_controller.mode() == BabrMode::Lite)
+-                .then_some(decision.output_pacing_rate_bytes_per_second());
+-    }
 +        self.babr_lite_last_guards = guards;
 +        self.babr_lite_controller.on_round(input)
 +    }
@@ -410,21 +416,13 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +    }
 +
 +    fn babr_lite_publish_pacing_decision(
-         &mut self, decision: BabrLiteDecision,
-     ) {
-         self.babr_lite_pacing_rate_bytes_per_second =
-@@ -731,9 +773,10 @@
-     fn babr_lite_publish_pacing_decision(
-         &mut self, decision: BabrLiteDecision,
-     ) {
--        self.babr_lite_pacing_rate_bytes_per_second =
--            (self.babr_lite_controller.mode() == BabrMode::Lite)
--                .then_some(decision.output_pacing_rate_bytes_per_second());
++        &mut self, decision: BabrLiteDecision,
++    ) {
 +        self.babr_lite_pacing_rate_bytes_per_second =
 +            (self.babr_lite_controller.mode() == BabrMode::Lite &&
 +                decision.control_applied)
 +                .then_some(decision.output_pacing_rate_bytes_per_second());
-     }
++    }
  
      fn babr_lite_refresh_pacing(&mut self, now: Instant) {
 diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
