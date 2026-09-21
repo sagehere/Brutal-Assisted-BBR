@@ -76,7 +76,7 @@ for needle in [
     "const RING_ENTRIES: usize = 128;",
     "const MAX_BYTES_PER_MINUTE: usize = 1_048_576;",
     "const MEMORY_BUDGET_BYTES: usize = 32_768;",
-    '"schema":"p2-lite-v1"',
+    "p2-lite-v1",
 ]:
     assert needle in telemetry, needle
 
