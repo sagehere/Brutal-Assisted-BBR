@@ -1,0 +1,103 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -54,5 +54,9 @@
+ use super::bbr2::BabrObserveSnapshot;
+ use super::bbr2::BBRv2;
++use super::babr_lite::BabrLiteController;
++use super::babr_lite::BabrLiteDecision;
++use super::babr_lite::BabrLiteInput;
++use super::babr_lite::BabrMode;
+ use super::babr_telemetry::BabrObserveTelemetry;
+ use super::babr_telemetry::BabrTelemetryStats;
+ use super::pacer::Pacer;
+@@ -435,6 +439,7 @@ pub struct GRecovery {
+     babr_actual_socket_sent_bytes: u64,
+     babr_unique_payload_delivered_bytes: u64,
+     babr_telemetry: BabrObserveTelemetry,
++    babr_lite_controller: BabrLiteController,
+ 
+     pub bytes_lost: u64,
+ 
+@@ -495,1 +500,29 @@ impl GRecovery {
++    pub(crate) fn babr_lite_mode(&self) -> BabrMode {
++        self.babr_lite_controller.mode()
++    }
++
++    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
++        self.babr_lite_controller.set_mode(mode);
++    }
++
++    pub(crate) fn babr_set_lite_target_bytes_per_second(
++        &mut self, target: u64,
++    ) -> bool {
++        self.babr_lite_controller
++            .set_target_bytes_per_second(target)
++    }
++
++    pub(crate) fn babr_set_lite_max_rate_bytes_per_second(
++        &mut self, max_rate: Option<u64>,
++    ) {
++        self.babr_lite_controller
++            .set_max_rate_bytes_per_second(max_rate);
++    }
++
++    pub(crate) fn babr_lite_decide(
++        &mut self, input: BabrLiteInput,
++    ) -> BabrLiteDecision {
++        self.babr_lite_controller.on_round(input)
++    }
++
+     pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
+@@ -617,6 +650,7 @@ impl GRecovery {
+             babr_actual_socket_sent_bytes: 0,
+             babr_unique_payload_delivered_bytes: 0,
+             babr_telemetry: Default::default(),
++            babr_lite_controller: Default::default(),
+             bytes_lost: 0,
+ 
+             max_datagram_size: recovery_config.max_send_udp_payload_size,
+@@ -1361,2 +1395,40 @@ mod tests {
++    #[test]
++    fn babr_lite_controller_is_attached_but_transport_inert() {
++        let mut r = new_babr_recovery();
++
++        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
++        assert!(r.babr_set_lite_target_bytes_per_second(26_000_000));
++
++        r.babr_set_lite_mode(BabrMode::Lite);
++        assert_eq!(r.babr_lite_mode(), BabrMode::Lite);
++
++        let snapshot = r.babr_observe_snapshot().bbr;
++        let decision = r.babr_lite_decide(BabrLiteInput {
++            now: Instant::now(),
++            phase: snapshot.phase,
++            end_of_round_trip: true,
++            baseline_pacing_rate_bytes_per_second: 20_000_000,
++            baseline_cwnd_bytes: 64_000,
++            model_delivery_rate_bytes_per_second: 20_000_000,
++            sample_valid: true,
++            sample_age_rounds: 0,
++            srtt: Duration::from_millis(50),
++            min_rtt: Duration::from_millis(40),
++            path_changed: false,
++            app_limited: false,
++            receiver_limited: false,
++            policy_limited: false,
++            loss_detected: false,
++            pto_fired: false,
++        });
++
++        assert!(!decision.control_applied);
++        assert_eq!(
++            decision.final_pacing_rate_bytes_per_second,
++            20_000_000
++        );
++        assert_eq!(decision.final_cwnd_bytes, 64_000);
++
++        r.babr_set_lite_mode(BabrMode::Off);
++        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
++    }
++
+     #[test]
+     fn test_high_pto_count_no_panic() {
