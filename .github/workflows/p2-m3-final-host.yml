@@ -1,0 +1,82 @@
+name: P2 M3 Final Host Gate
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/**"
+      - "阶段任务书/P1-冻结参数与用例.json"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-m3-final-host.yml"
+  workflow_dispatch:
+
+jobs:
+  m3-final-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config perl nasm
+
+      - name: Verify frozen Observe reference model
+        run: bash tools/p2/verify_observe.sh
+
+      - name: Apply complete frozen-host P2 patch stack
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Verify M3 Lite host invariants
+        run: bash tools/p2/verify-lite-host.sh
+
+      - name: Run full patched quiche host tests
+        run: |
+          cargo test             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche             --lib             --features gcongestion
+
+      - name: Run focused Lite controller and host regressions
+        run: |
+          cargo test             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche             --lib             --features gcongestion             babr_lite             -- --nocapture
+
+      - name: Verify Off equals Observe transport outputs
+        run: |
+          cargo test             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche             --lib             --features gcongestion             babr_off_observe_host_outputs_identical_with_telemetry_toggle             -- --nocapture
+
+      - name: Build and test tokio-quiche experiment bridge
+        run: |
+          cargo test             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p tokio-quiche             --lib             --features gcongestion
+
+      - name: Verify integration boundary and forbidden host changes
+        run: |
+          git -C third_party/quiche-0.29.3 diff --check
+          git -C third_party/quiche-0.29.3 diff --             quiche/src/recovery/gcongestion/bbr2.rs             quiche/src/recovery/gcongestion/pacer.rs             quiche/src/recovery/gcongestion/recovery.rs             quiche/src/recovery/mod.rs             quiche/src/lib.rs             tokio-quiche/src/quic/io/worker.rs             tokio-quiche/src/http3/driver/mod.rs             > /tmp/p2-m3-final-host.diff
+
+          ! grep -E '^[+].*bbr_is_in_recovery' /tmp/p2-m3-final-host.diff
+          ! grep -E '^[+].*limit_cwnd\(' /tmp/p2-m3-final-host.diff
+          ! grep -E '^[+].*(burst_tokens =|can_send\()' /tmp/p2-m3-final-host.diff
+
+      - name: Upload M3 final host evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-m3-final-host-${{ github.sha }}
+          path: /tmp/p2-m3-final-host.diff
+          if-no-files-found: warn
