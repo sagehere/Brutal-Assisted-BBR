@@ -1,7 +1,7 @@
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -668,12 +668,22 @@
+@@ -668,13 +668,23 @@
      pub(crate) fn babr_set_lite_target_bytes_per_second(
          &mut self, target: u64,
      ) -> bool {
@@ -27,7 +27,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +            self.babr_lite_refresh_pacing_non_round(Instant::now());
 +        }
      }
-@@ -694,15 +704,25 @@
+@@ -694,16 +704,26 @@
      pub(crate) fn babr_lite_decide_current(
          &mut self, now: Instant,
      ) -> BabrLiteDecision {
@@ -55,7 +55,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
              baseline_pacing_rate_bytes_per_second:
                  bbr.baseline_pacing_rate_bytes_per_second,
              baseline_cwnd_bytes: bbr.baseline_cwnd_bytes,
-@@ -782,6 +802,17 @@
+@@ -782,8 +802,19 @@
          let decision = self.babr_lite_decide_current(now);
          self.babr_lite_publish_pacing_decision(decision);
      }
