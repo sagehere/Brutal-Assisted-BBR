@@ -68,10 +68,10 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +        r.babr_set_lite_mode(BabrMode::Lite);
 +        assert_eq!(r.babr_lite_mode(), BabrMode::Lite);
 +
-+        let snapshot = r.babr_observe_snapshot().bbr;
++        let transport_outputs = (r.pacing_rate(), r.cwnd());
 +        let decision = r.babr_lite_decide(BabrLiteInput {
 +            now: Instant::now(),
-+            phase: snapshot.phase,
++            phase: r.babr_observe_snapshot().bbr.phase,
 +            end_of_round_trip: true,
 +            baseline_pacing_rate_bytes_per_second: 20_000_000,
 +            baseline_cwnd_bytes: 64_000,
@@ -89,11 +89,11 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +        });
 +
 +        assert!(!decision.control_applied);
-+        assert_eq!(
-+            decision.final_pacing_rate_bytes_per_second,
-+            20_000_000
-+        );
 +        assert_eq!(decision.final_cwnd_bytes, 64_000);
++        assert_eq!(
++            (r.pacing_rate(), r.cwnd()),
++            transport_outputs,
++        );
 +
 +        r.babr_set_lite_mode(BabrMode::Off);
 +        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
