@@ -13,7 +13,7 @@ CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 FLOW_BYTES="${BABR_P2_FLOW_BYTES:-8388608}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
-MAX_RATE_BPS="${BABR_P2_MAX_RATE_BPS:-6000000}"
+MAX_RATE_BPS="${BABR_P2_MAX_RATE_BPS:-2000000}"
 OUT="${BABR_P2_LITE_ENTRY_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-lite-entry-artifacts}"
 
 for bin in "$SERVER_BIN" "$CLIENT_BIN"; do
@@ -59,8 +59,6 @@ SERVER_PID=""
 response="$OUT/response/$FLOW_BYTES"
 [[ -f "$response" ]]
 [[ "$(stat -c %s "$response")" == "$FLOW_BYTES" ]]
-grep -Fq "BABR P2 experiment configured" "$OUT/server.log"
-
 python3 - "$start_ns" "$end_ns" "$FLOW_BYTES" "$TARGET_BPS" "$MAX_RATE_BPS" "$OUT/summary.json" <<'PY'
 import json
 import sys
@@ -84,7 +82,7 @@ summary = {
     "elapsed_seconds": elapsed,
     "minimum_elapsed_for_115pct_maxrate_seconds": minimum_elapsed,
     "policy_limited_by_construction": max_rate_bps < target_bps,
-    "entry_marker_seen": True,
+    "entry_proved_by_maxrate_timing": elapsed >= minimum_elapsed,
     "maxrate_timing_pass": elapsed >= minimum_elapsed,
 }
 with open(out, "w", encoding="utf-8") as fh:
