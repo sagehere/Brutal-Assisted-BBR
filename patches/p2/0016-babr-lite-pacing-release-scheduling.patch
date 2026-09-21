@@ -333,7 +333,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +
 +        let decision = r.babr_lite_decide(BabrLiteInput {
 +            now: Instant::now(),
-+            phase: BabrBbrPhase::ProbeBwCruise,
++            phase: super::super::bbr2::BabrBbrPhase::ProbeBwCruise,
 +            end_of_round_trip: true,
 +            baseline_pacing_rate_bytes_per_second: 20_000_000,
 +            baseline_cwnd_bytes: 64_000,
