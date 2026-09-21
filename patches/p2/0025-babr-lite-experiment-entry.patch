@@ -214,3 +214,4 @@ diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/drive
          H::conn_established(self, quiche_conn, handshake_info)?;
          self.babr_observe_enable_from_env(quiche_conn)?;
          Ok(())
+     }
