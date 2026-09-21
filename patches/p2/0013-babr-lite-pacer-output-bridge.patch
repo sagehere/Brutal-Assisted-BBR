@@ -1,0 +1,116 @@
+diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
+--- a/quiche/src/recovery/gcongestion/pacer.rs
++++ b/quiche/src/recovery/gcongestion/pacer.rs
+@@ -68,6 +68,10 @@ pub struct Pacer {
+     /// Underlying sender
+     sender: BBRv2,
++    /// Optional BABR-Lite output-layer pacing override.
++    ///
++    /// This never mutates BBRv2's own pacing model or congestion window.
++    babr_lite_rate_override: Option<Bandwidth>,
+     /// The maximum rate the [`Pacer`] will use.
+     max_pacing_rate: Option<Bandwidth>,
+@@ -88,6 +92,7 @@ impl Pacer {
+         Pacer {
+             enabled,
+             sender: congestion,
++            babr_lite_rate_override: None,
+             max_pacing_rate,
+             burst_tokens: INITIAL_UNPACED_BURST,
+@@ -101,6 +106,16 @@ impl Pacer {
+     pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+         self.sender.babr_observe_snapshot()
+     }
++
++    /// Apply or clear BABR-Lite only at the final pacing-output layer.
++    ///
++    /// The configured host MaxRate remains the final clamp in [`pacing_rate`].
++    /// M3.2 deliberately does not expose an activation API yet; later Lite
++    /// integration may supply an override only after the controller and all
++    /// send-admission safety checks authorize it.
++    pub(crate) fn babr_apply_lite_rate_override(&mut self, rate: Option<u64>) {
++        self.babr_lite_rate_override =
++            rate.map(Bandwidth::from_bytes_per_second);
++    }
+ 
+     pub fn on_packet_sent(
+@@ -227,9 +242,12 @@ impl Pacer {
+     pub fn pacing_rate(
+         &self, bytes_in_flight: usize, rtt_stats: &RttStats,
+     ) -> Bandwidth {
+         let sender_rate = self.sender.pacing_rate(bytes_in_flight, rtt_stats);
++        let effective_rate =
++            self.babr_lite_rate_override.unwrap_or(sender_rate);
++
+         match self.max_pacing_rate {
+-            Some(rate) if self.enabled => rate.min(sender_rate),
+-            _ => sender_rate,
++            Some(rate) if self.enabled => rate.min(effective_rate),
++            _ => effective_rate,
+         }
+     }
+@@ -298,3 +316,67 @@ impl Pacer {
+         !self.pacing_limited && self.sender.is_cwnd_limited(bytes_in_flight)
+     }
+ }
++
++#[cfg(test)]
++mod babr_lite_output_tests {
++    use std::time::Duration;
++
++    use super::*;
++
++    fn sender() -> BBRv2 {
++        BBRv2::new(
++            10,
++            10_000,
++            1200,
++            Duration::from_millis(100),
++            None,
++        )
++    }
++
++    fn rtt_stats() -> RttStats {
++        RttStats::new(
++            Duration::from_millis(100),
++            Duration::from_millis(25),
++        )
++    }
++
++    #[test]
++    fn babr_lite_override_changes_only_final_pacing_output() {
++        let rtt = rtt_stats();
++        let mut pacer = Pacer::new(true, sender(), None);
++        let baseline = pacer.pacing_rate(0, &rtt).to_bytes_per_second();
++        let baseline_cwnd = pacer.get_congestion_window();
++        let requested = baseline.saturating_mul(11) / 10;
++
++        pacer.babr_apply_lite_rate_override(Some(requested));
++
++        assert_eq!(
++            pacer.pacing_rate(0, &rtt).to_bytes_per_second(),
++            requested
++        );
++        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
++
++        pacer.babr_apply_lite_rate_override(None);
++        assert_eq!(
++            pacer.pacing_rate(0, &rtt).to_bytes_per_second(),
++            baseline
++        );
++        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
++    }
++
++    #[test]
++    fn host_max_rate_remains_final_clamp_over_lite_override() {
++        let rtt = rtt_stats();
++        let host_max = Bandwidth::from_bytes_per_second(123_456);
++        let mut pacer = Pacer::new(true, sender(), Some(host_max));
++        let baseline_cwnd = pacer.get_congestion_window();
++
++        pacer.babr_apply_lite_rate_override(Some(10_000_000));
++
++        assert_eq!(pacer.pacing_rate(0, &rtt), host_max);
++        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
++    }
++}
