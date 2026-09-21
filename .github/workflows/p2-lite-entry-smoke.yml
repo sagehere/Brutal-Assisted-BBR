@@ -58,7 +58,7 @@ jobs:
           BABR_LOSS_PCT: "0"
           BABR_P2_FLOW_BYTES: "8388608"
           BABR_P2_TARGET_BPS: "25000000"
-          BABR_P2_MAX_RATE_BPS: "6000000"
+          BABR_P2_MAX_RATE_BPS: "2000000"
           BABR_P2_LITE_ENTRY_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-lite-entry-artifacts
         run: |
           sudo -E bash tools/p2/netns/run-lite-entry-smoke.sh
