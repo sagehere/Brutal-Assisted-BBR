@@ -1,7 +1,7 @@
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -681,6 +681,28 @@
+@@ -681,6 +681,30 @@
          updated
      }
  
@@ -32,7 +32,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
      pub(crate) fn babr_set_lite_max_rate_bytes_per_second(
          &mut self, max_rate: Option<u64>,
      ) {
-@@ -1767,5 +1789,30 @@
+@@ -1767,5 +1791,31 @@
      }
  
      #[test]
@@ -125,7 +125,7 @@ diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
 diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/driver/mod.rs
 --- a/tokio-quiche/src/http3/driver/mod.rs
 +++ b/tokio-quiche/src/http3/driver/mod.rs
-@@ -1093,6 +1093,77 @@
+@@ -1093,6 +1093,80 @@
  const BABR_OBSERVE_DRAIN_INTERVAL: Duration = Duration::from_millis(250);
  
  impl<H: DriverHooks> H3Driver<H> {
@@ -206,7 +206,7 @@ diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/drive
      fn babr_observe_enable_from_env(
          &mut self, qconn: &mut QuicheConnection,
      ) -> QuicResult<()> {
-@@ -1310,7 +1381,9 @@
+@@ -1310,7 +1384,8 @@
  
          self.conn = Some(conn);
  
