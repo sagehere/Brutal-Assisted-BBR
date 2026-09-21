@@ -36,7 +36,7 @@ trap cleanup_all EXIT
 bash "$HERE/setup.sh" >/dev/null
 BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
 
-ip netns exec "$NS_D" env   RUST_LOG=info   BABR_P2_MODE=lite   BABR_P2_TARGET_BPS="$TARGET_BPS"   BABR_P2_MAX_RATE_BPS="$MAX_RATE_BPS"   "$SERVER_BIN"     --address "$D_IP:$PORT"     --cc-algorithm bbr2     --enable-pacing   > "$OUT/server.log" 2>&1 &
+ip netns exec "$NS_D" env   RUST_LOG=info   BABR_P2_MODE=lite   BABR_P2_TARGET_BPS="$TARGET_BPS"   BABR_P2_MAX_RATE_BPS="$MAX_RATE_BPS"   BABR_P2_LITE_TELEMETRY_FILE="$OUT/lite.jsonl"   "$SERVER_BIN"     --address "$D_IP:$PORT"     --cc-algorithm bbr2     --enable-pacing   > "$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 
 for _ in $(seq 1 80); do
@@ -59,6 +59,56 @@ SERVER_PID=""
 response="$OUT/response/$FLOW_BYTES"
 [[ -f "$response" ]]
 [[ "$(stat -c %s "$response")" == "$FLOW_BYTES" ]]
+[[ -s "$OUT/lite.jsonl" ]]
+
+python3 - "$OUT/lite.jsonl" "$OUT/lite-telemetry-summary.json" <<'PY'
+import json
+import sys
+
+src, out = sys.argv[1:]
+records = []
+with open(src, "r", encoding="utf-8") as fh:
+    for line_no, raw in enumerate(fh, 1):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"invalid Lite telemetry JSON on line {line_no}: {exc}")
+        if record.get("schema") != "p2-lite-v1":
+            raise SystemExit(
+                f"unexpected Lite telemetry schema on line {line_no}: "
+                f"{record.get('schema')!r}"
+            )
+        records.append(record)
+
+if not records:
+    raise SystemExit("Lite telemetry file contained no records")
+
+reasons = sorted({str(r.get("reason")) for r in records})
+states = sorted({str(r.get("state")) for r in records})
+if "POLICY_LIMITED" not in reasons:
+    raise SystemExit(
+        "policy-limited smoke did not emit POLICY_LIMITED telemetry: "
+        + ",".join(reasons)
+    )
+
+summary = {
+    "schema": "p2-lite-telemetry-smoke-v1",
+    "records": len(records),
+    "reasons": reasons,
+    "states": states,
+    "first_seq": records[0].get("seq"),
+    "last_seq": records[-1].get("seq"),
+    "policy_limited_seen": True,
+}
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump(summary, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+print(json.dumps(summary, sort_keys=True))
+PY
+
 python3 - "$start_ns" "$end_ns" "$FLOW_BYTES" "$TARGET_BPS" "$MAX_RATE_BPS" "$OUT/summary.json" <<'PY'
 import json
 import sys
