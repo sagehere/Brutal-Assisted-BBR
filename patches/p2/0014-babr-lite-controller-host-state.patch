@@ -57,7 +57,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
              bytes_lost: 0,
  
              max_datagram_size: recovery_config.max_send_udp_payload_size,
-@@ -1361,2 +1395,40 @@ mod tests {
+@@ -1361,2 +1395,43 @@ mod tests {
 +    #[test]
 +    fn babr_lite_controller_is_attached_but_transport_inert() {
 +        let mut r = new_babr_recovery();
