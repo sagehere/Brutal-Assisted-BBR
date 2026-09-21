@@ -216,7 +216,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
          }
  
          let reference_rate = self.reference_rate_bytes_per_second.unwrap();
-@@ -784,8 +889,121 @@
+@@ -784,8 +889,123 @@
          assert!(!d2.control_applied);
      }
  
@@ -251,6 +251,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 +        let now = Instant::now();
 +        let mut c = controller(BabrMode::Lite);
 +        let mut s = input(now);
++        s.srtt = Duration::from_millis(1);
 +        s.min_rtt = Duration::from_millis(1);
 +        c.on_round(s);
 +
@@ -275,6 +276,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/
 +        let now = Instant::now();
 +        let mut c = controller(BabrMode::Lite);
 +        let mut s = input(now);
++        s.srtt = Duration::from_millis(1);
 +        s.min_rtt = Duration::from_millis(1);
 +        c.on_round(s);
 +
