@@ -103,7 +103,7 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
  
      pub fn bandwidth_estimate(&self, rtt_stats: &RttStats) -> Bandwidth {
          self.sender.bandwidth_estimate(rtt_stats)
-@@ -409,8 +429,37 @@
+@@ -409,8 +429,38 @@
          assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
      }
  
@@ -116,7 +116,8 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +        let rtt = rtt_stats();
 +
 +        pacer.babr_set_policy_rate_cap_bytes_per_second(Some(2_000_000));
-+        assert!(pacer.pacing_rate(0, &rtt) <= host_max);
++        let baseline_with_host_cap = pacer.pacing_rate(0, &rtt);
++        assert!(baseline_with_host_cap <= host_max);
 +        assert_eq!(
 +            pacer.babr_lite_effective_pacing_rate(10_000_000),
 +            host_max,
@@ -124,14 +125,17 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +
 +        let tighter = Bandwidth::from_bytes_per_second(500_000);
 +        pacer.babr_set_policy_rate_cap_bytes_per_second(Some(500_000));
-+        assert_eq!(pacer.pacing_rate(0, &rtt), tighter);
++        assert_eq!(
++            pacer.pacing_rate(0, &rtt),
++            baseline_with_host_cap.min(tighter),
++        );
 +        assert_eq!(
 +            pacer.babr_lite_effective_pacing_rate(10_000_000),
 +            tighter,
 +        );
 +
 +        pacer.babr_set_policy_rate_cap_bytes_per_second(None);
-+        assert!(pacer.pacing_rate(0, &rtt) <= host_max);
++        assert_eq!(pacer.pacing_rate(0, &rtt), baseline_with_host_cap);
 +        assert_eq!(
 +            pacer.babr_lite_effective_pacing_rate(10_000_000),
 +            host_max,
