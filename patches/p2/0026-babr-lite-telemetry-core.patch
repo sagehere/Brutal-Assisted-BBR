@@ -12,9 +12,15 @@ diff --git a/quiche/src/recovery/gcongestion/mod.rs b/quiche/src/recovery/gconge
 diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
 --- a/quiche/src/recovery/gcongestion/babr_lite.rs
 +++ b/quiche/src/recovery/gcongestion/babr_lite.rs
-@@ -101,6 +101,21 @@
+@@ -101,12 +101,27 @@
      pub(crate) soft_guard: bool,
      pub(crate) hard_guard: bool,
+ }
+ 
+ impl BabrLiteDecision {
+     pub(crate) fn output_pacing_rate_bytes_per_second(&self) -> u64 {
+         self.final_pacing_rate_bytes_per_second
+     }
  }
  
 +#[derive(Debug, Clone, Copy)]
