@@ -40,9 +40,8 @@ diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcong
 +            babr_last_loss_detected: false,
              mss: max_segment_size,
              params,
-@@ -603,10 +609,33 @@
+@@ -603,9 +609,32 @@
      }
- 
  
 -    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
 -        self.babr_last_end_of_round_trip
@@ -189,7 +188,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/reco
 diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
 --- a/quiche/src/recovery/gcongestion/recovery.rs
 +++ b/quiche/src/recovery/gcongestion/recovery.rs
-@@ -583,8 +583,9 @@
+@@ -583,9 +583,10 @@
      babr_actual_socket_sent_bytes: u64,
      babr_unique_payload_delivered_bytes: u64,
 -    babr_telemetry: BabrObserveTelemetry,
@@ -201,11 +200,11 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +    babr_lite_last_guards: BabrTransportGuardCounters,
 +
 +    pub bytes_lost: u64,
+ 
      max_datagram_size: usize,
      time_sent_set_to_now: bool,
-@@ -652,9 +653,17 @@
+@@ -652,8 +653,16 @@
      }
- 
  
 -    pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
 -        self.babr_lite_controller.set_mode(mode);
@@ -224,9 +223,8 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  
      pub(crate) fn babr_set_lite_target_bytes_per_second(
          &mut self, target: u64,
-@@ -670,12 +679,52 @@
+@@ -670,11 +679,51 @@
      }
- 
  
 -    pub(crate) fn babr_lite_decide(
 -        &mut self, input: BabrLiteInput,
@@ -297,9 +295,10 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
  
              max_datagram_size: recovery_config.max_send_udp_payload_size,
              time_sent_set_to_now: cc.time_sent_set_to_now(),
-@@ -1881,10 +1931,30 @@
+@@ -1880,11 +1930,31 @@
              transport_outputs,
          );
+ 
 -        r.babr_set_lite_mode(BabrMode::Off);
 -        assert_eq!(r.babr_lite_mode(), BabrMode::Off);
 -    }
