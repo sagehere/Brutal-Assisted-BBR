@@ -1,0 +1,137 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -106,5 +106,25 @@
+ impl BabrLiteDecision {
+     pub(crate) fn output_pacing_rate_bytes_per_second(&self) -> u64 {
+         self.final_pacing_rate_bytes_per_second
+     }
++
++    pub(crate) fn telemetry_exit(
++        state: BabrLiteState, reason: BabrReasonCode, weight_steps: u8,
++        baseline_pacing_rate_bytes_per_second: u64, baseline_cwnd_bytes: usize,
++    ) -> Self {
++        Self {
++            state,
++            reason,
++            shadow_reason: reason,
++            weight_steps,
++            candidate_pacing_rate_bytes_per_second:
++                baseline_pacing_rate_bytes_per_second,
++            final_pacing_rate_bytes_per_second:
++                baseline_pacing_rate_bytes_per_second,
++            final_cwnd_bytes: baseline_cwnd_bytes,
++            control_applied: false,
++            soft_guard: false,
++            hard_guard: false,
++        }
++    }
+ }
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -589,7 +589,7 @@
+     babr_unique_payload_delivered_bytes: u64,
+     babr_telemetry: BabrObserveTelemetry,
+     babr_lite_controller: BabrLiteController,
+-    babr_lite_telemetry: BabrLiteTelemetry,
++    babr_lite_telemetry: Option<Box<BabrLiteTelemetry>>,
+     babr_lite_last_guards: BabrTransportGuardCounters,
+     babr_lite_pacing_rate_bytes_per_second: Option<u64>,
+     babr_lite_next_packet_admitted: bool,
+@@ -782,60 +782,68 @@
+     pub(crate) fn babr_set_lite_telemetry_enabled(&mut self, enabled: bool) {
+-        self.babr_lite_telemetry.set_enabled(enabled);
++        if enabled {
++            let telemetry = self.babr_lite_telemetry.get_or_insert_with(|| {
++                Box::new(BabrLiteTelemetry::default())
++            });
++            telemetry.set_enabled(true);
++        } else {
++            self.babr_lite_telemetry = None;
++        }
+     }
+ 
+     pub(crate) fn babr_take_lite_telemetry_json_lines(
+         &mut self, now: Instant,
+     ) -> Vec<String> {
+-        self.babr_lite_telemetry.take_json_lines(now)
++        self.babr_lite_telemetry
++            .as_mut()
++            .map(|telemetry| telemetry.take_json_lines(now))
++            .unwrap_or_default()
+     }
+ 
+     fn babr_record_lite_decision(
+         &mut self, now: Instant, snapshot: BabrRecoveryObserveSnapshot,
+         decision: BabrLiteDecision,
+     ) {
+-        if !self.babr_lite_telemetry.enabled() {
++        let Some(telemetry) = self.babr_lite_telemetry.as_mut() else {
+             return;
+-        }
++        };
++        if !telemetry.enabled() {
++            return;
++        }
+ 
+         let input = BabrLiteTelemetryInput {
+             now,
+             phase: snapshot.bbr.phase,
+             baseline_pacing_rate_bytes_per_second:
+                 snapshot.bbr.baseline_pacing_rate_bytes_per_second,
+             baseline_cwnd_bytes: snapshot.bbr.baseline_cwnd_bytes,
+             model_delivery_rate_bytes_per_second:
+                 snapshot.bbr.model_delivery_rate_bytes_per_second,
+             unique_payload_delivered_bytes:
+                 snapshot.accounting.unique_payload_delivered_bytes,
+             actual_socket_sent_bytes:
+                 snapshot.accounting.actual_socket_sent_bytes,
+             decision,
+             controller: self.babr_lite_controller.trace_snapshot(),
+         };
+-        self.babr_lite_telemetry.record_if_changed(input);
++        telemetry.record_if_changed(input);
+     }
+ 
+     fn babr_record_lite_reason(
+         &mut self, now: Instant, reason: BabrReasonCode,
+     ) {
+-        if !self.babr_lite_telemetry.enabled() {
++        if self.babr_lite_telemetry.is_none() {
+             return;
+         }
+ 
+         let snapshot = self.babr_observe_snapshot();
+         let controller = self.babr_lite_controller.trace_snapshot();
+         let baseline = snapshot.bbr.baseline_pacing_rate_bytes_per_second;
+-        let decision = BabrLiteDecision {
+-            state: controller.state,
+-            reason,
+-            shadow_reason: reason,
+-            weight_steps: controller.weight_steps,
+-            candidate_pacing_rate_bytes_per_second: baseline,
+-            final_pacing_rate_bytes_per_second: baseline,
+-            final_cwnd_bytes: snapshot.bbr.baseline_cwnd_bytes,
+-            control_applied: false,
+-            soft_guard: false,
+-            hard_guard: false,
+-        };
++        let decision = BabrLiteDecision::telemetry_exit(
++            controller.state,
++            reason,
++            controller.weight_steps,
++            baseline,
++            snapshot.bbr.baseline_cwnd_bytes,
++        );
+         self.babr_record_lite_decision(now, snapshot, decision);
+     }
+@@ -1080,7 +1080,7 @@
+             babr_unique_payload_delivered_bytes: 0,
+             babr_telemetry: Default::default(),
+             babr_lite_controller: Default::default(),
+-            babr_lite_telemetry: Default::default(),
++            babr_lite_telemetry: None,
+             babr_lite_last_guards: Default::default(),
+             babr_lite_pacing_rate_bytes_per_second: None,
+             babr_lite_next_packet_admitted: false,
