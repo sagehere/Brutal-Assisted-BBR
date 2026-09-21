@@ -26,7 +26,7 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
  
      pub fn on_packet_sent(
          &mut self, sent_time: Instant, bytes_in_flight: usize,
-@@ -298,3 +316,61 @@ impl Pacer {
+@@ -298,3 +316,60 @@ impl Pacer {
          !self.pacing_limited && self.sender.is_cwnd_limited(bytes_in_flight)
      }
  }
