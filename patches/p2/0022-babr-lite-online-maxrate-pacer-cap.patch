@@ -103,7 +103,7 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
  
      pub fn bandwidth_estimate(&self, rtt_stats: &RttStats) -> Bandwidth {
          self.sender.bandwidth_estimate(rtt_stats)
-@@ -409,8 +429,38 @@
+@@ -409,8 +429,41 @@
          assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
      }
  
