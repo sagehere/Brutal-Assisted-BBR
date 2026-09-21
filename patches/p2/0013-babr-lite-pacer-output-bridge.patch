@@ -1,55 +1,32 @@
 diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
 --- a/quiche/src/recovery/gcongestion/pacer.rs
 +++ b/quiche/src/recovery/gcongestion/pacer.rs
-@@ -68,4 +68,8 @@ pub struct Pacer {
-     /// Underlying sender
-     sender: BBRv2,
-+    /// Optional BABR-Lite output-layer pacing override.
-+    ///
-+    /// This never mutates BBRv2's own pacing model or congestion window.
-+    babr_lite_rate_override: Option<Bandwidth>,
-     /// The maximum rate the [`Pacer`] will use.
-     max_pacing_rate: Option<Bandwidth>,
-@@ -88,5 +92,6 @@ impl Pacer {
-         Pacer {
-             enabled,
-             sender: congestion,
-+            babr_lite_rate_override: None,
-             max_pacing_rate,
-             burst_tokens: INITIAL_UNPACED_BURST,
-@@ -101,5 +106,16 @@ impl Pacer {
+@@ -101,6 +101,24 @@ impl Pacer {
      pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
          self.sender.babr_observe_snapshot()
      }
 +
-+    /// Apply or clear BABR-Lite only at the final pacing-output layer.
++    /// Resolve one already-authorized BABR-Lite pacing decision at the final
++    /// output layer without mutating BBRv2 state.
 +    ///
-+    /// The configured host MaxRate remains the final clamp in [`pacing_rate`].
-+    /// M3.2 deliberately does not expose an activation API yet; later Lite
-+    /// integration may supply an override only after the controller and all
-+    /// send-admission safety checks authorize it.
-+    pub(crate) fn babr_apply_lite_rate_override(&mut self, rate: Option<u64>) {
-+        self.babr_lite_rate_override =
-+            rate.map(Bandwidth::from_bytes_per_second);
++    /// The normal Off/Observe path does not call this helper, so the existing
++    /// [`pacing_rate`] hot path remains byte-for-byte unchanged. Host
++    /// `max_pacing_rate` is still the final clamp.
++    pub(crate) fn babr_lite_effective_pacing_rate(
++        &self, requested_rate_bytes_per_second: u64,
++    ) -> Bandwidth {
++        let requested =
++            Bandwidth::from_bytes_per_second(requested_rate_bytes_per_second);
++
++        match self.max_pacing_rate {
++            Some(rate) if self.enabled => rate.min(requested),
++            _ => requested,
++        }
 +    }
  
      pub fn on_packet_sent(
-@@ -227,9 +242,12 @@ impl Pacer {
-     pub fn pacing_rate(
-         &self, bytes_in_flight: usize, rtt_stats: &RttStats,
-     ) -> Bandwidth {
-         let sender_rate = self.sender.pacing_rate(bytes_in_flight, rtt_stats);
-+        let effective_rate =
-+            self.babr_lite_rate_override.unwrap_or(sender_rate);
-+
-         match self.max_pacing_rate {
--            Some(rate) if self.enabled => rate.min(sender_rate),
--            _ => sender_rate,
-+            Some(rate) if self.enabled => rate.min(effective_rate),
-+            _ => effective_rate,
-         }
-     }
-@@ -298,3 +316,64 @@ impl Pacer {
+         &mut self, sent_time: Instant, bytes_in_flight: usize,
+@@ -298,3 +316,61 @@ impl Pacer {
          !self.pacing_limited && self.sender.is_cwnd_limited(bytes_in_flight)
      }
  }
@@ -78,22 +55,18 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +    }
 +
 +    #[test]
-+    fn babr_lite_override_changes_only_final_pacing_output() {
++    fn babr_lite_bridge_leaves_normal_pacer_path_unchanged() {
 +        let rtt = rtt_stats();
-+        let mut pacer = Pacer::new(true, sender(), None);
++        let pacer = Pacer::new(true, sender(), None);
 +        let baseline = pacer.pacing_rate(0, &rtt).to_bytes_per_second();
 +        let baseline_cwnd = pacer.get_congestion_window();
 +        let requested = baseline.saturating_mul(11) / 10;
 +
-+        pacer.babr_apply_lite_rate_override(Some(requested));
-+
 +        assert_eq!(
-+            pacer.pacing_rate(0, &rtt).to_bytes_per_second(),
++            pacer.babr_lite_effective_pacing_rate(requested)
++                .to_bytes_per_second(),
 +            requested
 +        );
-+        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
-+
-+        pacer.babr_apply_lite_rate_override(None);
 +        assert_eq!(
 +            pacer.pacing_rate(0, &rtt).to_bytes_per_second(),
 +            baseline
@@ -102,15 +75,15 @@ diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcon
 +    }
 +
 +    #[test]
-+    fn host_max_rate_remains_final_clamp_over_lite_override() {
-+        let rtt = rtt_stats();
++    fn host_max_rate_is_final_clamp_for_lite_bridge() {
 +        let host_max = Bandwidth::from_bytes_per_second(123_456);
-+        let mut pacer = Pacer::new(true, sender(), Some(host_max));
++        let pacer = Pacer::new(true, sender(), Some(host_max));
 +        let baseline_cwnd = pacer.get_congestion_window();
 +
-+        pacer.babr_apply_lite_rate_override(Some(10_000_000));
-+
-+        assert_eq!(pacer.pacing_rate(0, &rtt), host_max);
++        assert_eq!(
++            pacer.babr_lite_effective_pacing_rate(10_000_000),
++            host_max
++        );
 +        assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
 +    }
 +}
