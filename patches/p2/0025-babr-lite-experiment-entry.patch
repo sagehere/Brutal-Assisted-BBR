@@ -206,8 +206,7 @@ diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/drive
      fn babr_observe_enable_from_env(
          &mut self, qconn: &mut QuicheConnection,
      ) -> QuicResult<()> {
-@@ -1310,7 +1384,8 @@
- 
+@@ -1310,6 +1384,7 @@
          self.conn = Some(conn);
  
 +        self.babr_experiment_configure_from_env(quiche_conn)?;
