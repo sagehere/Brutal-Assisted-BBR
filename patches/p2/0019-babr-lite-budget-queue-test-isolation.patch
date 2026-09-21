@@ -1,0 +1,58 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -945,15 +945,16 @@
+         c.on_round(s);
+ 
+         assert_eq!(c.assist_budget_bytes, 60_000);
+-        for _ in 0..50 {
+-            assert_eq!(
+-                c.admit_generated_datagram(now, 1_200),
+-                BabrLiteAdmission::Assist,
+-            );
+-        }
+-
+-        assert_eq!(
+-            c.on_send_entry(now),
++        for _ in 0..50 {
++            assert_eq!(
++                c.admit_generated_datagram(now, 1_200),
++                BabrLiteAdmission::Assist,
++            );
++            c.resolve_unrevocable_queue();
++        }
++
++        assert_eq!(
++            c.on_send_entry(now),
+             Some(BabrReasonCode::AssistBudgetExhausted),
+         );
+         assert_eq!(c.state, BabrLiteState::AssistBackoff);
+@@ -969,12 +970,22 @@
+         s.min_rtt = Duration::from_millis(1);
+         c.on_round(s);
+ 
+-        assert_eq!(
+-            c.admit_generated_datagram(now, 59_000),
+-            BabrLiteAdmission::Assist,
+-        );
+-        assert_eq!(
+-            c.admit_generated_datagram(now, 1_001),
++        for _ in 0..49 {
++            assert_eq!(
++                c.admit_generated_datagram(now, 1_200),
++                BabrLiteAdmission::Assist,
++            );
++            c.resolve_unrevocable_queue();
++        }
++        assert_eq!(
++            c.admit_generated_datagram(now, 200),
++            BabrLiteAdmission::Assist,
++        );
++        c.resolve_unrevocable_queue();
++        assert_eq!(c.assist_budget_debit_bytes, 59_000);
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_001),
+             BabrLiteAdmission::Withdraw(
+                 BabrReasonCode::AssistBudgetExhausted,
+             ),
