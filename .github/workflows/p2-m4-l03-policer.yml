@@ -56,7 +56,7 @@ jobs:
           # Pre-admission shaping remains below the 200 Mbps Target while
           # leaving room for bounded Assist. The actual 150 Mbps drop policer
           # is still installed only after real Assist admission.
-          BABR_P2_L03_INITIAL_SHAPER_MBIT: "180"
+          BABR_P2_L03_INITIAL_SHAPER_MBIT: "195"
           # The runner records BLOCKED if safety gates prevent admission; G2
           # rejects that status.
           # Exploratory stimulus calibration only: 16 concurrent 64 MiB
@@ -67,7 +67,7 @@ jobs:
           # Low-queue settings remain below the frozen 20 ms hard queue guard.
           BABR_P2_L03_TBF_BURST_KB: "64"
           BABR_P2_L03_TBF_LATENCY_MS: "5"
-          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v8-pre-shaper180-calibration"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v9-pre-shaper195-calibration"
           BABR_P2_L03_RUNS: "1"
           BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: |
