@@ -76,7 +76,7 @@ with open(src, "r", encoding="utf-8") as fh:
             record = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise SystemExit(f"invalid Lite telemetry JSON on line {line_no}: {exc}")
-        if record.get("schema") != "p2-lite-v1":
+        if record.get("schema") != "p2-lite-v2":
             raise SystemExit(
                 f"unexpected Lite telemetry schema on line {line_no}: "
                 f"{record.get('schema')!r}"

@@ -52,6 +52,7 @@ required_patches = [
     "0027-babr-lite-telemetry-host-wiring.patch",
     "0028-babr-lite-telemetry-lazy-closure.patch",
     "0029-babr-lite-telemetry-file-sink.patch",
+    "0030-babr-lite-evidence-fields.patch",
 ]
 for name in required_patches:
     assert (root / "patches/p2" / name).is_file(), name
@@ -76,7 +77,13 @@ for needle in [
     "const RING_ENTRIES: usize = 128;",
     "const MAX_BYTES_PER_MINUTE: usize = 1_048_576;",
     "const MEMORY_BUDGET_BYTES: usize = 32_768;",
-    "p2-lite-v1",
+    "p2-lite-v2",
+    "configuration_version",
+    "dropped_records",
+    "connection_tag",
+    "inflight_bytes",
+    "sample_valid",
+    "assist_deadline_monotonic_us",
 ]:
     assert needle in telemetry, needle
 

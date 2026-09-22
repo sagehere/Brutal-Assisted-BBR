@@ -11,15 +11,19 @@ HOST="$P2_ROOT/third_party/quiche-0.29.3"
 SERVER_BIN="${BABR_P2_SERVER_BIN:-$HOST/target/debug/examples/async_http3_server}"
 CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
-FLOW_BYTES="${BABR_P2_FLOW_BYTES:-67108864}"
+FLOW_BYTES="${BABR_P2_FLOW_BYTES:-268435456}"
+REQUESTS="${BABR_P2_L03_REQUESTS:-4}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
+TBF_BURST_KB="${BABR_P2_L03_TBF_BURST_KB:-64}"
+TBF_LATENCY_MS="${BABR_P2_L03_TBF_LATENCY_MS:-5}"
+EXPERIMENT_VERSION="${BABR_P2_L03_EXPERIMENT_VERSION:-l03-policer-v2-low-queue}"
 OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit" > "$OUT/config.txt"
+echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -28,11 +32,19 @@ cleanup() {
 trap cleanup EXIT
 
 bash "$HERE/setup.sh" >/dev/null
-BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
-
-# L03: bottleneck is deliberately below BABR target. This is a safety proof,
-# not a throughput benchmark. Keep policer units explicit in mbit.
-ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate "${POLICER_MBIT}mbit" burst 32kb latency 50ms
+# Start at the intended 150 Mbps capacity so the 200 Mbps Target is genuinely
+# unreachable yet can enter bounded Assist without packet drops. After an
+# Assist record exists, open the shaper and add the real policer to prove that
+# a later loss revokes already-active assistance.
+# The generic netns default (512 KiB / 100 ms) itself creates >20 ms queueing
+# at 150 Mbps and makes the frozen hard guard reject every Assist attempt.
+# Keep the same capacity but bound the test shaper to 64 KiB / 5 ms so L03
+# first exercises admission under low queue, then applies its real drop policer.
+BABR_RATE_MBIT="$POLICER_MBIT" \
+  BABR_TBF_BURST_KB="$TBF_BURST_KB" \
+  BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
+  BABR_DATA_DIRECTION=receiver_to_sender \
+  bash "$HERE/shape.sh" >/dev/null
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -42,41 +54,64 @@ ip netns exec "$NS_D" env \
   > "$OUT/server.log" 2>&1 &
 
 sleep 1
-ip netns exec "$NS_S" "$CLIENT_BIN" \
-  "https://test.com/stream-bytes/$FLOW_BYTES" \
+# The example server feeds a single response through a bounded channel, which
+# can make every sample application-limited. Four concurrent real H3 streams
+# keep the same connection's sender supplied without changing BBR or Lite.
+CLIENT_URL="https://test.com/stream-bytes/$FLOW_BYTES"
+CLIENT_URLS=()
+for _ in $(seq 1 "$REQUESTS"); do
+  CLIENT_URLS+=("$CLIENT_URL")
+done
+ip netns exec "$NS_S" "$CLIENT_BIN" "${CLIENT_URLS[@]}" \
   --no-verify --connect-to "$D_IP:$PORT" \
   --http-version HTTP/3 \
   --dump-responses "$OUT/response" \
-  > "$OUT/client.log" 2>&1
+  > "$OUT/client.log" 2>&1 &
+CLIENT_PID=$!
 
-python3 - "$OUT/lite.jsonl" "$OUT/summary.json" <<'PY'
-import json,sys
-src,out=sys.argv[1:]
-records=[json.loads(x) for x in open(src,encoding='utf-8') if x.strip()]
-if not records:
-    raise SystemExit('no Lite telemetry')
+ASSIST_SEEN=0
+# Startup queue protection may legitimately enter the frozen 30-second
+# backoff. Keep this controlled bulk flow alive long enough to observe a later
+# real admission, without altering the controller or its recovery rules.
+for _ in $(seq 1 600); do
+  if [[ -s "$OUT/lite.jsonl" ]] && grep -Fq '"control_applied":true' "$OUT/lite.jsonl"; then
+    ASSIST_SEEN=1
+    break
+  fi
+  if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$ASSIST_SEEN" != 1 ]]; then
+  wait "$CLIENT_PID" || true
+  # This is a valid fail-closed outcome, not permission to weaken admission,
+  # CWND, or recovery rules. Preserve the trace and an explicit BLOCKED summary
+  # so the G2 aggregator cannot mistake a non-exercised policer for PASS.
+  printf '%s\n' 'policer_not_armed=no real Assist admission' > "$OUT/policer-status.txt"
+  python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
+    "$OUT/lite.jsonl" --scenario l03 --summary "$OUT/summary.json" --allow-blocked
+  echo 'P2 L03 policer safety evidence: BLOCKED (no Assist admission)'
+  exit 0
+fi
 
-reasons={r.get('reason') for r in records}
-allowed={
-    'HARD_QUEUE_DELAY',
-    'ASSIST_TIMEOUT',
-    'ASSIST_BUDGET_EXHAUSTED',
-    'MAX_ROUNDS',
-    'NO_BENEFIT',
-    'POLICY_LIMITED',
-}
-if not reasons & allowed:
-    raise SystemExit(f'no L03 exit/control evidence: {reasons}')
+# The initial TBF intentionally permits Assist. The policer is then the only
+# loss source: it is installed on the actual QUIC data-sender egress and its
+# post-run overlimit counter is mandatory evidence.
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate 500mbit burst 64kb latency 5ms
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" clsact
+ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 \
+  flower ip_proto udp \
+  action police rate "${POLICER_MBIT}mbit" burst 32kb mtu 64kb drop
+ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
+wait "$CLIENT_PID"
 
-states=[r.get('state') for r in records]
-summary={
-    'schema':'p2-l03-v2',
-    'records':len(records),
-    'reasons':sorted(reasons),
-    'states':sorted(set(states)),
-    'hard_exit_or_control_seen':bool(reasons & allowed),
-}
-json.dump(summary,open(out,'w'),indent=2)
-PY
+ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
+if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then
+  echo "L03 policer did not drop traffic; refusing to treat the shaper as policer evidence" >&2
+  exit 94
+fi
+python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
+  "$OUT/lite.jsonl" --scenario l03 --summary "$OUT/summary.json"
 
 echo 'P2 L03 policer safety smoke: PASS'

@@ -1,4 +1,4 @@
-name: P2 M4 L03 Policier Safety
+name: P2 M4 L03 Policer Evidence
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -39,20 +39,42 @@ jobs:
           bash tools/p2/preflight.sh
           bash tools/p2/apply-host-patches.sh
 
+      - name: Verify fail-closed P2 evidence checkers
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_verify_g2_evidence.py
+
       - name: Build quiche applications
         run: |
           cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p tokio-quiche --example async_http3_server --features gcongestion
           cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p quiche_apps --bin quiche-client
 
-      - name: Run L03 policer safety scenario
+      - name: Collect L03 policer evidence
         env:
           # Target is byte/s inside BABR. 25,000,000 byte/s ~= 200 Mbps.
           BABR_P2_TARGET_BPS: "25000000"
           # Policer is explicit mbit/s for tc. 150 Mbps bottleneck.
           BABR_P2_POLICER_MBIT: "150"
-          BABR_P2_FLOW_BYTES: "16777216"
-          BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
-        run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
+          # The runner starts at 150 Mbps and only arms the dropping policer
+          # after a real Assist admission. If safety gates prevent admission,
+          # it records BLOCKED; G2 rejects that status.
+          # Four concurrent 256 MiB streams keep one real sender supplied for
+          # a one-GiB total flow, past the unchanged 30 s backoff.
+          BABR_P2_FLOW_BYTES: "268435456"
+          BABR_P2_L03_REQUESTS: "4"
+          # Versioned low-queue calibration: preserve the 150 Mbps bottleneck
+          # while avoiding a TBF buffer large enough to trip the 20 ms hard
+          # queue guard before admission can be exercised.
+          BABR_P2_L03_TBF_BURST_KB: "64"
+          BABR_P2_L03_TBF_LATENCY_MS: "5"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v2-low-queue"
+          BABR_P2_L03_RUNS: "10"
+          BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
+        run: |
+          set -euo pipefail
+          for run in $(seq -w 1 "$BABR_P2_L03_RUNS"); do
+            echo "L03 independent run $run/$BABR_P2_L03_RUNS"
+            BABR_P2_L03_ARTIFACT_DIR="$BABR_P2_L03_ARTIFACT_ROOT/run-$run" \
+              sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
+          done
 
       - name: Upload L03 evidence
         if: always()
