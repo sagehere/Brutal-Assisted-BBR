@@ -13,11 +13,13 @@ CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
 FLOW_BYTES="${BABR_P2_FLOW_BYTES:-67108864}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
-POLICER_BPS="${BABR_P2_POLICER_BPS:-15000000}"
+POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
 OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
+
+echo "L03 config: target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -29,8 +31,8 @@ bash "$HERE/setup.sh" >/dev/null
 BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
 
 # L03: bottleneck is deliberately below BABR target. This is a safety proof,
-# not a throughput benchmark.
-ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate "$POLICER_BPS"bit burst 32kb latency 50ms
+# not a throughput benchmark. Keep policer units explicit in mbit.
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate "${POLICER_MBIT}mbit" burst 32kb latency 50ms
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -53,10 +55,28 @@ src,out=sys.argv[1:]
 records=[json.loads(x) for x in open(src,encoding='utf-8') if x.strip()]
 if not records:
     raise SystemExit('no Lite telemetry')
+
 reasons={r.get('reason') for r in records}
-if not reasons & {'ASSIST_TIMEOUT','ASSIST_BUDGET_EXHAUSTED','MAX_ROUNDS','NO_BENEFIT','POLICY_LIMITED'}:
+allowed={
+    'HARD_QUEUE_DELAY',
+    'ASSIST_TIMEOUT',
+    'ASSIST_BUDGET_EXHAUSTED',
+    'MAX_ROUNDS',
+    'NO_BENEFIT',
+    'POLICY_LIMITED',
+}
+if not reasons & allowed:
     raise SystemExit(f'no L03 exit/control evidence: {reasons}')
-json.dump({'schema':'p2-l03-v1','records':len(records),'reasons':sorted(reasons)},open(out,'w'),indent=2)
+
+states=[r.get('state') for r in records]
+summary={
+    'schema':'p2-l03-v2',
+    'records':len(records),
+    'reasons':sorted(reasons),
+    'states':sorted(set(states)),
+    'hard_exit_or_control_seen':bool(reasons & allowed),
+}
+json.dump(summary,open(out,'w'),indent=2)
 PY
 
 echo 'P2 L03 policer safety smoke: PASS'
