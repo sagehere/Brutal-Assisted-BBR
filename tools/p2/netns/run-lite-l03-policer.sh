@@ -50,6 +50,10 @@ BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
 # initial non-policing TBF/netem setup instead of inferred from Lite reasons.
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-before.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-before.txt"
+echo "Initial router data qdisc before transfer ($R_S_IF):"
+cat "$OUT/initial-router-data-qdisc-before.txt"
+echo "Server data qdisc before transfer ($D_IF):"
+cat "$OUT/server-data-qdisc-before.txt"
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -92,6 +96,10 @@ if [[ "$ASSIST_SEEN" != 1 ]]; then
   wait "$CLIENT_PID" || true
   ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
   ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
+  echo "Initial router data qdisc after transfer ($R_S_IF):"
+  cat "$OUT/initial-router-data-qdisc-after.txt"
+  echo "Server data qdisc after transfer ($D_IF):"
+  cat "$OUT/server-data-qdisc-after.txt"
   # This is a valid fail-closed outcome, not permission to weaken admission,
   # CWND, or recovery rules. Preserve the trace and an explicit BLOCKED summary
   # so the G2 aggregator cannot mistake a non-exercised policer for PASS.
@@ -115,6 +123,10 @@ wait "$CLIENT_PID"
 
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
+echo "Initial router data qdisc after transfer ($R_S_IF):"
+cat "$OUT/initial-router-data-qdisc-after.txt"
+echo "Server data qdisc after transfer ($D_IF):"
+cat "$OUT/server-data-qdisc-after.txt"
 
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
 if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then
