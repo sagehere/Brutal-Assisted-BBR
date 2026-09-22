@@ -11,7 +11,8 @@ HOST="$P2_ROOT/third_party/quiche-0.29.3"
 SERVER_BIN="${BABR_P2_SERVER_BIN:-$HOST/target/debug/examples/async_http3_server}"
 CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
-FLOW_BYTES="${BABR_P2_FLOW_BYTES:-1073741824}"
+FLOW_BYTES="${BABR_P2_FLOW_BYTES:-268435456}"
+REQUESTS="${BABR_P2_L03_REQUESTS:-4}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
 OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
@@ -19,7 +20,7 @@ OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit" > "$OUT/config.txt"
+echo "L03 config: target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -42,8 +43,15 @@ ip netns exec "$NS_D" env \
   > "$OUT/server.log" 2>&1 &
 
 sleep 1
-ip netns exec "$NS_S" "$CLIENT_BIN" \
-  "https://test.com/stream-bytes/$FLOW_BYTES" \
+# The example server feeds a single response through a bounded channel, which
+# can make every sample application-limited. Four concurrent real H3 streams
+# keep the same connection's sender supplied without changing BBR or Lite.
+CLIENT_URL="https://test.com/stream-bytes/$FLOW_BYTES"
+CLIENT_URLS=()
+for _ in $(seq 1 "$REQUESTS"); do
+  CLIENT_URLS+=("$CLIENT_URL")
+done
+ip netns exec "$NS_S" "$CLIENT_BIN" "${CLIENT_URLS[@]}" \
   --no-verify --connect-to "$D_IP:$PORT" \
   --http-version HTTP/3 \
   --dump-responses "$OUT/response" \

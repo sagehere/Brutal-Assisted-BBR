@@ -2,7 +2,7 @@
 
 ## L03 policer safety
 
-`run-lite-l03-policer.sh` begins on a 150 Mbps TBF with a 200 Mbps Target. Its 1 GiB flow remains alive beyond the frozen 30-second startup backoff, then it only opens that shaper and installs a real 150 Mbps UDP `tc police` action after a real Assist admission; the policer's `overlimits` counter is required evidence. If the controller's existing safety gates never admit Assist, the runner preserves its trace as `BLOCKED` and never arms the policer or weakens the host limits.
+`run-lite-l03-policer.sh` begins on a 150 Mbps TBF with a 200 Mbps Target. Four concurrent 256 MiB HTTP/3 streams keep one real connection supplied for a 1 GiB total flow beyond the frozen 30-second startup backoff, then the runner only opens that shaper and installs a real 150 Mbps UDP `tc police` action after a real Assist admission; the policer's `overlimits` counter is required evidence. If the controller's existing safety gates never admit Assist, the runner preserves its trace as `BLOCKED` and never arms the policer or weakens the host limits.
 
 Frozen goals:
 
