@@ -1,0 +1,258 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -45,6 +45,9 @@
+ use super::babr_lite::BabrLiteDecision;
+ use super::babr_lite::BabrLiteInput;
+ use super::babr_lite::BabrMode;
++use super::babr_lite_telemetry::BabrLiteTelemetry;
++use super::babr_lite_telemetry::BabrLiteTelemetryInput;
+ use super::babr_telemetry::BabrObserveTelemetry;
++use super::babr_telemetry::BabrReasonCode;
+ use super::babr_telemetry::BabrTelemetryStats;
+ use super::pacer::Pacer;
+@@ -586,6 +586,7 @@
+     babr_unique_payload_delivered_bytes: u64,
+     babr_telemetry: BabrObserveTelemetry,
+     babr_lite_controller: BabrLiteController,
++    babr_lite_telemetry: BabrLiteTelemetry,
+     babr_lite_last_guards: BabrTransportGuardCounters,
+     babr_lite_pacing_rate_bytes_per_second: Option<u64>,
+     babr_lite_next_packet_admitted: bool,
+@@ -650,14 +650,22 @@
+     pub(crate) fn babr_set_lite_mode(&mut self, mode: BabrMode) {
++        let leaving_lite = self.babr_lite_controller.mode() == BabrMode::Lite &&
++            mode != BabrMode::Lite;
+         if mode == BabrMode::Lite &&
+             self.babr_lite_controller.mode() != BabrMode::Lite
+         {
+             // Off/Observe counters are historical baseline, not new Lite
+             // events. Only guards after this transition may gate control.
+             self.babr_lite_last_guards = self.babr_guard_counters;
+             self.babr_lite_pacing_rate_bytes_per_second = None;
+         } else if mode != BabrMode::Lite {
+             self.babr_lite_pacing_rate_bytes_per_second = None;
+         }
+ 
+         self.babr_lite_controller.set_mode(mode);
++        if leaving_lite {
++            self.babr_record_lite_reason(
++                Instant::now(),
++                BabrReasonCode::ModeNotLite,
++            );
++        }
+     }
+@@ -755,7 +755,9 @@
+         // Consume each transport guard generation at most once so one event
+         // cannot be replayed by later ACK callbacks.
+         self.babr_lite_last_guards = guards;
+-        self.babr_lite_decide_input_with_round_override(
++        let decision = self.babr_lite_decide_input_with_round_override(
+             input, force_non_round,
+-        )
++        );
++        self.babr_record_lite_decision(now, snapshot, decision);
++        decision
+     }
+@@ -771,4 +771,65 @@
+         self.babr_lite_controller.on_round(input)
+     }
+ 
++    pub(crate) fn babr_set_lite_telemetry_enabled(&mut self, enabled: bool) {
++        self.babr_lite_telemetry.set_enabled(enabled);
++    }
++
++    pub(crate) fn babr_take_lite_telemetry_json_lines(
++        &mut self, now: Instant,
++    ) -> Vec<String> {
++        self.babr_lite_telemetry.take_json_lines(now)
++    }
++
++    fn babr_record_lite_decision(
++        &mut self, now: Instant, snapshot: BabrRecoveryObserveSnapshot,
++        decision: BabrLiteDecision,
++    ) {
++        if !self.babr_lite_telemetry.enabled() {
++            return;
++        }
++
++        let input = BabrLiteTelemetryInput {
++            now,
++            phase: snapshot.bbr.phase,
++            baseline_pacing_rate_bytes_per_second:
++                snapshot.bbr.baseline_pacing_rate_bytes_per_second,
++            baseline_cwnd_bytes: snapshot.bbr.baseline_cwnd_bytes,
++            model_delivery_rate_bytes_per_second:
++                snapshot.bbr.model_delivery_rate_bytes_per_second,
++            unique_payload_delivered_bytes:
++                snapshot.accounting.unique_payload_delivered_bytes,
++            actual_socket_sent_bytes:
++                snapshot.accounting.actual_socket_sent_bytes,
++            decision,
++            controller: self.babr_lite_controller.trace_snapshot(),
++        };
++        self.babr_lite_telemetry.record_if_changed(input);
++    }
++
++    fn babr_record_lite_reason(
++        &mut self, now: Instant, reason: BabrReasonCode,
++    ) {
++        if !self.babr_lite_telemetry.enabled() {
++            return;
++        }
++
++        let snapshot = self.babr_observe_snapshot();
++        let controller = self.babr_lite_controller.trace_snapshot();
++        let baseline = snapshot.bbr.baseline_pacing_rate_bytes_per_second;
++        let decision = BabrLiteDecision {
++            state: controller.state,
++            reason,
++            shadow_reason: reason,
++            weight_steps: controller.weight_steps,
++            candidate_pacing_rate_bytes_per_second: baseline,
++            final_pacing_rate_bytes_per_second: baseline,
++            final_cwnd_bytes: snapshot.bbr.baseline_cwnd_bytes,
++            control_applied: false,
++            soft_guard: false,
++            hard_guard: false,
++        };
++        self.babr_record_lite_decision(now, snapshot, decision);
++    }
++
+     pub(crate) fn babr_lite_deadline(&self) -> Option<Instant> {
+@@ -788,17 +788,18 @@
+     pub(crate) fn babr_lite_on_deadline_timer(&mut self, now: Instant) {
+-        if self
++        if let Some(reason) = self
+             .babr_lite_controller
+             .on_deadline_timer(now)
+-            .is_some()
+         {
+             self.babr_lite_pacing_rate_bytes_per_second = None;
++            self.babr_record_lite_reason(now, reason);
+         }
+     }
+ 
+     pub(crate) fn babr_lite_on_send_entry(&mut self, now: Instant) {
+         self.babr_lite_next_packet_admitted = false;
+ 
+-        if self.babr_lite_controller.on_send_entry(now).is_some() {
++        if let Some(reason) = self.babr_lite_controller.on_send_entry(now) {
+             self.babr_lite_pacing_rate_bytes_per_second = None;
++            self.babr_record_lite_reason(now, reason);
+         }
+     }
+@@ -829,5 +829,6 @@
+-            BabrLiteAdmission::Withdraw(_) => {
++            BabrLiteAdmission::Withdraw(reason) => {
+                 self.babr_lite_next_packet_admitted = false;
+                 self.babr_lite_pacing_rate_bytes_per_second = None;
++                self.babr_record_lite_reason(now, reason);
+                 false
+             },
+@@ -1018,6 +1018,7 @@
+             babr_unique_payload_delivered_bytes: 0,
+             babr_telemetry: Default::default(),
+             babr_lite_controller: Default::default(),
++            babr_lite_telemetry: Default::default(),
+             babr_lite_last_guards: Default::default(),
+             babr_lite_pacing_rate_bytes_per_second: None,
+             babr_lite_next_packet_admitted: false,
+@@ -1880,2 +1880,15 @@
+     #[test]
++    fn babr_lite_telemetry_wiring_records_explicit_exit() {
++        let mut r = new_babr_recovery();
++        r.babr_set_lite_telemetry_enabled(true);
++        let now = Instant::now();
++        r.babr_record_lite_reason(now, BabrReasonCode::AssistTimeout);
++
++        let lines = r.babr_take_lite_telemetry_json_lines(now);
++        assert_eq!(lines.len(), 1);
++        assert!(lines[0].contains("\"schema\":\"p2-lite-v1\""));
++        assert!(lines[0].contains("\"reason\":\"ASSIST_TIMEOUT\""));
++    }
++
++    #[test]
+     fn babr_experiment_entry_is_explicit_and_fail_closed() {
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -389,13 +389,29 @@
+     pub(crate) fn babr_configure_experiment(
+         &mut self, mode: &str, target: u64, max_rate: Option<u64>,
+     ) -> bool {
+         match self {
+             Recovery::GCongestion(recovery) =>
+                 recovery.babr_configure_experiment(mode, target, max_rate),
+ 
+             // BABR P2 is defined only for the frozen Bbr2Gcongestion host.
+             Recovery::Legacy(_) => false,
+         }
+     }
+ 
++    pub(crate) fn babr_set_lite_telemetry_enabled(&mut self, enabled: bool) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_set_lite_telemetry_enabled(enabled);
++        }
++    }
++
++    pub(crate) fn babr_take_lite_telemetry_json_lines(
++        &mut self, now: Instant,
++    ) -> Vec<String> {
++        match self {
++            Recovery::GCongestion(recovery) =>
++                recovery.babr_take_lite_telemetry_json_lines(now),
++            Recovery::Legacy(_) => Vec::new(),
++        }
++    }
++
+     pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -7592,4 +7592,45 @@
+         Ok(())
+     }
+ 
++    /// Enable or disable BABR Lite control telemetry for one real path.
++    #[doc(hidden)]
++    pub fn babr_set_lite_telemetry_enabled(
++        &mut self, from: SocketAddr, to: SocketAddr, enabled: bool,
++    ) -> Result<()> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        if enabled {
++            // Lite telemetry has one bounded ring per selected connection.
++            for (_, path) in self.paths.iter_mut() {
++                path.recovery.babr_set_lite_telemetry_enabled(false);
++            }
++        }
++
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_set_lite_telemetry_enabled(enabled);
++        Ok(())
++    }
++
++    /// Drain BABR Lite control telemetry as newline-delimited JSON records.
++    #[doc(hidden)]
++    pub fn babr_take_lite_telemetry_json_lines(
++        &mut self, from: SocketAddr, to: SocketAddr,
++    ) -> Result<Vec<String>> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        Ok(self
++            .paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_take_lite_telemetry_json_lines(Instant::now()))
++    }
++
+     /// Enable or disable BABR Observe telemetry for one real path.

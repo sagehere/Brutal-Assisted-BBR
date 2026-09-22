@@ -1,0 +1,66 @@
+diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
+--- a/quiche/src/recovery/gcongestion/bbr2.rs
++++ b/quiche/src/recovery/gcongestion/bbr2.rs
+@@ -613,4 +613,8 @@ impl BBRv2 {
+         self.params.time_sent_set_to_now
+     }
+ 
++    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
++        self.babr_last_end_of_round_trip
++    }
++
+     pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
+--- a/quiche/src/recovery/gcongestion/pacer.rs
++++ b/quiche/src/recovery/gcongestion/pacer.rs
+@@ -97,4 +97,8 @@ impl Pacer {
+         self.sender.get_congestion_window()
+     }
+ 
++    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
++        self.sender.babr_observe_end_of_round_trip()
++    }
++
+     pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -353,3 +353,7 @@ impl GRecovery {
++    pub(crate) fn babr_observe_end_of_round_trip(&self) -> bool {
++        self.pacer.babr_observe_end_of_round_trip()
++    }
++
+     pub(crate) fn babr_observe_snapshot(&self) -> BabrRecoveryObserveSnapshot {
+         let bbr = self.pacer.babr_observe_snapshot();
+         let accounting = BabrObserveAccounting {
+diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+--- a/quiche/src/recovery/gcongestion/babr_telemetry.rs
++++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+@@ -153,4 +153,10 @@ impl BabrObserveTelemetry {
+         self.enabled
+     }
+ 
++    pub(crate) fn has_new_guard(
++        &self, guards: BabrTransportGuardCounters,
++    ) -> bool {
++        self.guard_reason(guards).is_some()
++    }
++
+     pub(crate) fn set_enabled(
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -511,5 +511,13 @@ impl GRecovery {
+             return;
+         }
+ 
++        if !self.babr_observe_end_of_round_trip() &&
++            !self
++                .babr_telemetry
++                .has_new_guard(self.babr_guard_counters)
++        {
++            return;
++        }
++
+         let snapshot = self.babr_observe_snapshot();
+         self.babr_telemetry.record_if_interesting(now, snapshot);

@@ -39,6 +39,7 @@ def baseline_only(reason, event, state, failure=False, invalidate_sample=False):
     if failure:
         state["failures"] += 1
         state["backoff_until_ms"] = event["now_ms"] + backoff_ms(state["failures"])
+    state["babr_state"] = policy["next_state"]
     return {
         "state": policy["next_state"],
         "reason": reason,
@@ -62,6 +63,7 @@ def decide(event, state):
     state.setdefault("backoff_until_ms", 0)
     state.setdefault("used_bytes", 0)
     state.setdefault("rounds", 0)
+    state.setdefault("babr_state", "BASELINE")
     state.setdefault("started_ms", now)
     state.setdefault("reference_rate", baseline)
     state.setdefault("deadline_ms", state["started_ms"] + p["max_duration_ms"])
@@ -115,7 +117,16 @@ def decide(event, state):
         < state["reference_rate"] * p["minimum_model_gain_ratio"]
     ):
         return baseline_only("NO_BENEFIT", event, state, failure=True)
-    if baseline >= target * CFG["target"]["exit_ratio"]:
+    delivery = event.get("model_delivery_rate", baseline)
+    if (
+        state["babr_state"] != "ASSIST"
+        and delivery >= target * CFG["target"]["enter_ratio"]
+    ):
+        return baseline_only("TARGET_NEAR", event, state)
+    if (
+        state["babr_state"] == "ASSIST"
+        and delivery >= target * CFG["target"]["exit_ratio"]
+    ):
         return baseline_only("TARGET_NEAR", event, state)
 
     if q_delay >= soft:
@@ -125,6 +136,7 @@ def decide(event, state):
         weight = min(1.0, state["weight"] + p["weight_step_per_bbr_round"])
         reason = registered("BOUNDED_PROBE")
     state["weight"] = weight
+    state["babr_state"] = "ASSIST"
     rate = min(
         candidate_rate(state["reference_rate"], target, weight),
         event.get("max_rate", 2**63 - 1),
@@ -184,8 +196,8 @@ def run():
     check("C11 current host does not synthesize ECN/PC", c11)
     check("C12 deadline has zero grace", c12)
     check("C13 every decision reason is registered", c13)
-    check("C14 required v3 parameters are complete", c14)
-    check("C15 normative version contract is v3", c15)
+    check("C14 required v4 parameters are complete", c14)
+    check("C15 normative version and target hysteresis contract is v4", c15)
 
 
 def c01():
@@ -196,7 +208,7 @@ def c01():
             model_delivery_rate=18_750_000,
             srtt_ms=52,
         ),
-        {"rounds": 2, "reference_rate": 18_750_000},
+        {"babr_state": "ASSIST", "rounds": 2, "reference_rate": 18_750_000},
     )
     assert result["reason"] == "NO_BENEFIT"
     assert result["state"] == "ASSIST_BACKOFF"
@@ -224,9 +236,9 @@ def c04():
 
 
 def c05():
-    assert decide(base_event(now_ms=300), {"started_ms": 0})["reason"] == "ASSIST_TIMEOUT"
+    assert decide(base_event(now_ms=300), {"babr_state": "ASSIST", "started_ms": 0})["reason"] == "ASSIST_TIMEOUT"
     budget = ms_budget(20_000_000, 50)
-    state = {"used_bytes": budget - 1000, "reference_rate": 20_000_000}
+    state = {"babr_state": "ASSIST", "used_bytes": budget - 1000, "reference_rate": 20_000_000}
     assert decide(base_event(next_datagram_bytes=1200), state)["reason"] == "ASSIST_BUDGET_EXHAUSTED"
     assert CFG["assist"]["max_unrevocable_queue_bytes"] == 2400
 
@@ -249,15 +261,15 @@ def c07():
 
 def c08():
     result = decide(
-        base_event(model_delivery_rate=30_000_000),
-        {"rounds": 2, "reference_rate": 20_000_000},
+        base_event(target=40_000_000, model_delivery_rate=30_000_000),
+        {"babr_state": "ASSIST", "rounds": 2, "reference_rate": 20_000_000},
     )
     assert result["state"] == "ASSIST"
     assert result["cwnd"] == 12_000
 
 
 def c09():
-    assert CFG["schema_version"] == "p1-baseline-v3"
+    assert CFG["schema_version"] == "p1-baseline-v4"
     assert CFG["capabilities"]["bbr_is_in_recovery"] == "not_used"
     assert CFG["capabilities"]["persistent_congestion_signal"].startswith("unsupported")
     assert CFG["capabilities"]["ecn_ce_signal"].startswith("unsupported")
@@ -281,7 +293,7 @@ def c11():
 
 
 def c12():
-    state = {"started_ms": 0, "deadline_ms": 300}
+    state = {"babr_state": "ASSIST", "started_ms": 0, "deadline_ms": 300}
     assert decide(base_event(now_ms=299), state)["reason"] in ("BOUNDED_PROBE", "SOFT_FREEZE")
     assert decide(base_event(now_ms=300), state)["reason"] == "ASSIST_TIMEOUT"
     assert decide(base_event(now_ms=301), state)["reason"] == "ASSIST_TIMEOUT"
@@ -327,9 +339,37 @@ def c14():
 
 
 def c15():
-    assert CFG["schema_version"] == "p1-baseline-v3"
-    assert CFG["configuration_version"] == "2026-09-19-p1-final"
+    assert CFG["schema_version"] == "p1-baseline-v4"
+    assert CFG["configuration_version"] == "2026-09-20-p1-hysteresis-errata"
     assert CFG["normative_authority"]["behavior_spec"] == "P1-修订规格与冻结基线.md"
+    assert CFG["target"]["hysteresis_band_behavior"] == "preserve_current_state"
+    assert CFG["target"]["delivery_signal"] == "model_delivery_rate"
+
+    at_enter = decide(
+        base_event(baseline_rate=20_000_000, model_delivery_rate=20_000_000, target=25_000_000),
+        {"babr_state": "BASELINE"},
+    )
+    assert at_enter["state"] == "BASELINE"
+    assert at_enter["reason"] == "TARGET_NEAR"
+
+    below_enter = decide(
+        base_event(baseline_rate=19_000_000, model_delivery_rate=19_000_000, target=25_000_000),
+        {"babr_state": "BASELINE", "reference_rate": 19_000_000},
+    )
+    assert below_enter["state"] == "ASSIST"
+
+    in_band = decide(
+        base_event(baseline_rate=21_000_000, model_delivery_rate=21_000_000, target=25_000_000),
+        {"babr_state": "ASSIST", "reference_rate": 19_000_000, "rounds": 1},
+    )
+    assert in_band["state"] == "ASSIST"
+
+    at_exit = decide(
+        base_event(baseline_rate=22_500_000, model_delivery_rate=22_500_000, target=25_000_000),
+        {"babr_state": "ASSIST", "reference_rate": 19_000_000, "rounds": 1},
+    )
+    assert at_exit["state"] == "BASELINE"
+    assert at_exit["reason"] == "TARGET_NEAR"
 
 
 if __name__ == "__main__":

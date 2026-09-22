@@ -1,0 +1,401 @@
+diff --git a/quiche/src/recovery/gcongestion/mod.rs b/quiche/src/recovery/gcongestion/mod.rs
+--- a/quiche/src/recovery/gcongestion/mod.rs
++++ b/quiche/src/recovery/gcongestion/mod.rs
+@@ -26,6 +26,7 @@
+ mod bbr;
+ mod bbr2;
+ mod babr_lite;
++mod babr_lite_telemetry;
+ mod babr_telemetry;
+ pub mod pacer;
+ mod recovery;
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -101,12 +101,27 @@
+     pub(crate) soft_guard: bool,
+     pub(crate) hard_guard: bool,
+ }
+ 
+ impl BabrLiteDecision {
+     pub(crate) fn output_pacing_rate_bytes_per_second(&self) -> u64 {
+         self.final_pacing_rate_bytes_per_second
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct BabrLiteTraceSnapshot {
++    pub(crate) state: BabrLiteState,
++    pub(crate) target_bytes_per_second: u64,
++    pub(crate) reference_rate_bytes_per_second: Option<u64>,
++    pub(crate) assist_deadline: Option<Instant>,
++    pub(crate) assist_budget_bytes: u64,
++    pub(crate) assist_budget_debit_bytes: u64,
++    pub(crate) assist_unrevocable_queue_bytes: u64,
++    pub(crate) failure_count: u32,
++    pub(crate) backoff_deadline: Option<Instant>,
++    pub(crate) rounds: u8,
++    pub(crate) weight_steps: u8,
++}
++
+ #[derive(Debug)]
+ pub(crate) struct BabrLiteController {
+@@ -141,6 +141,24 @@
+ impl BabrLiteController {
+     pub(crate) fn mode(&self) -> BabrMode {
+         self.mode
+     }
+ 
++    pub(crate) fn trace_snapshot(&self) -> BabrLiteTraceSnapshot {
++        BabrLiteTraceSnapshot {
++            state: self.state,
++            target_bytes_per_second: self.target_bytes_per_second,
++            reference_rate_bytes_per_second:
++                self.reference_rate_bytes_per_second,
++            assist_deadline: self.assist_deadline,
++            assist_budget_bytes: self.assist_budget_bytes,
++            assist_budget_debit_bytes: self.assist_budget_debit_bytes,
++            assist_unrevocable_queue_bytes:
++                self.assist_unrevocable_queue_bytes,
++            failure_count: self.failure_count,
++            backoff_deadline: self.backoff_deadline,
++            rounds: self.rounds,
++            weight_steps: self.weight_steps,
++        }
++    }
++
+     pub(crate) fn set_mode(&mut self, mode: BabrMode) {
+diff --git a/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
+new file mode 100644
+--- /dev/null
++++ b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
+@@ -0,0 +1,329 @@
++// Copyright (C) 2024, Cloudflare, Inc.
++// All rights reserved.
++//
++// BABR P2 Lite control telemetry. Disabled by default.
++
++use std::collections::VecDeque;
++use std::time::Duration;
++use std::time::Instant;
++
++use super::babr_lite::BabrLiteDecision;
++use super::babr_lite::BabrLiteState;
++use super::babr_lite::BabrLiteTraceSnapshot;
++use super::bbr2::BabrBbrPhase;
++
++const RING_ENTRIES: usize = 128;
++const MAX_BYTES_PER_MINUTE: usize = 1_048_576;
++const MEMORY_BUDGET_BYTES: usize = 32_768;
++const WINDOW: Duration = Duration::from_secs(60);
++const NA: u64 = u64::MAX;
++
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct BabrLiteTelemetryInput {
++    pub(crate) now: Instant,
++    pub(crate) phase: BabrBbrPhase,
++    pub(crate) baseline_pacing_rate_bytes_per_second: u64,
++    pub(crate) baseline_cwnd_bytes: usize,
++    pub(crate) model_delivery_rate_bytes_per_second: u64,
++    pub(crate) unique_payload_delivered_bytes: Option<u64>,
++    pub(crate) actual_socket_sent_bytes: Option<u64>,
++    pub(crate) decision: BabrLiteDecision,
++    pub(crate) controller: BabrLiteTraceSnapshot,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++struct Record {
++    seq: u64,
++    t_us: u64,
++    target: u64,
++    b_ref: u64,
++    baseline_pacing: u64,
++    candidate_pacing: u64,
++    final_pacing: u64,
++    model_delivery: u64,
++    unique_payload: u64,
++    actual_socket_sent: u64,
++    budget: u64,
++    budget_debit: u64,
++    unrevocable_queue: u64,
++    deadline_remaining_us: u64,
++    backoff_remaining_us: u64,
++    cwnd: u32,
++    failures: u32,
++    phase: BabrBbrPhase,
++    state: BabrLiteState,
++    reason: super::babr_telemetry::BabrReasonCode,
++    w: u8,
++    rounds: u8,
++    control: bool,
++}
++
++impl Record {
++    fn same_control(self, other: Self) -> bool {
++        self.phase == other.phase &&
++            self.state == other.state &&
++            self.reason == other.reason &&
++            self.w == other.w &&
++            self.rounds == other.rounds &&
++            self.target == other.target &&
++            self.b_ref == other.b_ref &&
++            self.candidate_pacing == other.candidate_pacing &&
++            self.final_pacing == other.final_pacing &&
++            self.budget == other.budget &&
++            self.budget_debit == other.budget_debit &&
++            self.unrevocable_queue == other.unrevocable_queue &&
++            self.failures == other.failures &&
++            self.control == other.control
++    }
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct BabrLiteTelemetry {
++    enabled: bool,
++    records: VecDeque<Record>,
++    last: Option<Record>,
++    next_seq: u64,
++    dropped: u64,
++    epoch: Option<Instant>,
++    window_started: Option<Instant>,
++    bytes_in_window: usize,
++}
++
++impl BabrLiteTelemetry {
++    pub(crate) fn enabled(&self) -> bool {
++        self.enabled
++    }
++
++    pub(crate) fn set_enabled(&mut self, enabled: bool) {
++        if !enabled {
++            *self = Self::default();
++        } else if !self.enabled {
++            self.enabled = true;
++        }
++    }
++
++    fn opt(v: Option<u64>) -> u64 {
++        v.unwrap_or(NA)
++    }
++
++    fn remaining(now: Instant, deadline: Option<Instant>) -> u64 {
++        deadline
++            .map(|d| d.saturating_duration_since(now).as_micros())
++            .map(|v| v.min(u64::MAX as u128) as u64)
++            .unwrap_or(NA)
++    }
++
++    pub(crate) fn record_if_changed(&mut self, i: BabrLiteTelemetryInput) {
++        if !self.enabled {
++            return;
++        }
++
++        let epoch = *self.epoch.get_or_insert(i.now);
++        let c = i.controller;
++        let d = i.decision;
++        let mut record = Record {
++            seq: 0,
++            t_us: i.now
++                .saturating_duration_since(epoch)
++                .as_micros()
++                .min(u64::MAX as u128) as u64,
++            target: c.target_bytes_per_second,
++            b_ref: Self::opt(c.reference_rate_bytes_per_second),
++            baseline_pacing: i.baseline_pacing_rate_bytes_per_second,
++            candidate_pacing: d.candidate_pacing_rate_bytes_per_second,
++            final_pacing: d.final_pacing_rate_bytes_per_second,
++            model_delivery: i.model_delivery_rate_bytes_per_second,
++            unique_payload: Self::opt(i.unique_payload_delivered_bytes),
++            actual_socket_sent: Self::opt(i.actual_socket_sent_bytes),
++            budget: c.assist_budget_bytes,
++            budget_debit: c.assist_budget_debit_bytes,
++            unrevocable_queue: c.assist_unrevocable_queue_bytes,
++            deadline_remaining_us: Self::remaining(i.now, c.assist_deadline),
++            backoff_remaining_us: Self::remaining(i.now, c.backoff_deadline),
++            cwnd: u32::try_from(i.baseline_cwnd_bytes).unwrap_or(u32::MAX),
++            failures: c.failure_count,
++            phase: i.phase,
++            state: d.state,
++            reason: d.reason,
++            w: d.weight_steps,
++            rounds: c.rounds,
++            control: d.control_applied,
++        };
++
++        if self.last.is_some_and(|last| last.same_control(record)) {
++            return;
++        }
++
++        self.next_seq = self.next_seq.saturating_add(1);
++        record.seq = self.next_seq;
++        self.last = Some(record);
++        if self.records.len() == RING_ENTRIES {
++            self.records.pop_front();
++            self.dropped = self.dropped.saturating_add(1);
++        }
++        self.records.push_back(record);
++    }
++
++    fn metric(v: u64) -> String {
++        if v == NA {
++            "null".into()
++        } else {
++            v.to_string()
++        }
++    }
++
++    fn state_name(v: BabrLiteState) -> &'static str {
++        match v {
++            BabrLiteState::Baseline => "BASELINE",
++            BabrLiteState::Assist => "ASSIST",
++            BabrLiteState::AssistBackoff => "ASSIST_BACKOFF",
++        }
++    }
++
++    fn json(r: Record) -> String {
++        format!(
++            concat!(
++                "{{\"schema\":\"p2-lite-v1\",\"seq\":{},\"t_us\":{},",
++                "\"phase\":\"{}\",\"state\":\"{}\",\"reason\":\"{}\",",
++                "\"W_steps\":{},\"rounds\":{},\"target_Bps\":{},\"B_ref_Bps\":{},",
++                "\"baseline_pacing_Bps\":{},\"candidate_pacing_Bps\":{},\"final_pacing_Bps\":{},",
++                "\"baseline_cwnd_bytes\":{},\"model_delivery_Bps\":{},\"unique_payload_bytes\":{},",
++                "\"actual_socket_sent_bytes\":{},\"budget_bytes\":{},\"budget_debit_bytes\":{},",
++                "\"unrevocable_queue_bytes\":{},\"failure_count\":{},",
++                "\"assist_deadline_remaining_us\":{},\"backoff_remaining_us\":{},",
++                "\"control_applied\":{}}}"
++            ),
++            r.seq,
++            r.t_us,
++            r.phase.as_str(),
++            Self::state_name(r.state),
++            r.reason.as_str(),
++            r.w,
++            r.rounds,
++            r.target,
++            Self::metric(r.b_ref),
++            r.baseline_pacing,
++            r.candidate_pacing,
++            r.final_pacing,
++            r.cwnd,
++            r.model_delivery,
++            Self::metric(r.unique_payload),
++            Self::metric(r.actual_socket_sent),
++            r.budget,
++            r.budget_debit,
++            r.unrevocable_queue,
++            r.failures,
++            Self::metric(r.deadline_remaining_us),
++            Self::metric(r.backoff_remaining_us),
++            r.control,
++        )
++    }
++
++    pub(crate) fn take_json_lines(&mut self, now: Instant) -> Vec<String> {
++        if self
++            .window_started
++            .is_none_or(|s| now.saturating_duration_since(s) >= WINDOW)
++        {
++            self.window_started = Some(now);
++            self.bytes_in_window = 0;
++        }
++
++        let mut out = Vec::new();
++        while let Some(record) = self.records.front().copied() {
++            let line = Self::json(record);
++            let charge = line.len().saturating_add(1);
++            if self.bytes_in_window.saturating_add(charge) >
++                MAX_BYTES_PER_MINUTE
++            {
++                break;
++            }
++            self.records.pop_front();
++            self.bytes_in_window =
++                self.bytes_in_window.saturating_add(charge);
++            out.push(line);
++        }
++        out
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use std::mem::size_of;
++
++    use super::*;
++    use crate::recovery::gcongestion::babr_telemetry::BabrReasonCode;
++
++    #[test]
++    fn lite_trace_is_bounded_deduped_and_explains_exit() {
++        assert!(size_of::<Record>() * RING_ENTRIES <= MEMORY_BUDGET_BYTES);
++        let now = Instant::now();
++        let decision = BabrLiteDecision {
++            state: BabrLiteState::Assist,
++            reason: BabrReasonCode::BoundedProbe,
++            shadow_reason: BabrReasonCode::BoundedProbe,
++            weight_steps: 1,
++            candidate_pacing_rate_bytes_per_second: 20_100_000,
++            final_pacing_rate_bytes_per_second: 20_100_000,
++            final_cwnd_bytes: 64_000,
++            control_applied: true,
++            soft_guard: false,
++            hard_guard: false,
++        };
++        let controller = BabrLiteTraceSnapshot {
++            state: BabrLiteState::Assist,
++            target_bytes_per_second: 25_000_000,
++            reference_rate_bytes_per_second: Some(20_000_000),
++            assist_deadline: Some(now + Duration::from_millis(300)),
++            assist_budget_bytes: 3_000_000,
++            assist_budget_debit_bytes: 1_200,
++            assist_unrevocable_queue_bytes: 1_200,
++            failure_count: 0,
++            backoff_deadline: None,
++            rounds: 1,
++            weight_steps: 1,
++        };
++        let input = BabrLiteTelemetryInput {
++            now,
++            phase: BabrBbrPhase::ProbeBwCruise,
++            baseline_pacing_rate_bytes_per_second: 20_000_000,
++            baseline_cwnd_bytes: 64_000,
++            model_delivery_rate_bytes_per_second: 20_000_000,
++            unique_payload_delivered_bytes: Some(123_000),
++            actual_socket_sent_bytes: Some(150_000),
++            decision,
++            controller,
++        };
++
++        let mut t = BabrLiteTelemetry::default();
++        t.record_if_changed(input);
++        assert!(t.take_json_lines(now).is_empty());
++
++        t.set_enabled(true);
++        t.record_if_changed(input);
++        t.record_if_changed(BabrLiteTelemetryInput {
++            now: now + Duration::from_millis(1),
++            ..input
++        });
++
++        let mut exit = input;
++        exit.now += Duration::from_millis(2);
++        exit.decision.state = BabrLiteState::AssistBackoff;
++        exit.decision.reason = BabrReasonCode::AssistTimeout;
++        exit.decision.weight_steps = 0;
++        exit.decision.control_applied = false;
++        exit.controller.state = BabrLiteState::AssistBackoff;
++        exit.controller.weight_steps = 0;
++        exit.controller.failure_count = 1;
++        exit.controller.backoff_deadline =
++            Some(exit.now + Duration::from_secs(30));
++        t.record_if_changed(exit);
++
++        let lines = t.take_json_lines(exit.now);
++        assert_eq!(lines.len(), 2);
++        assert!(lines[0].contains("\"state\":\"ASSIST\""));
++        assert!(lines[0].contains("\"W_steps\":1"));
++        assert!(lines[1].contains("\"reason\":\"ASSIST_TIMEOUT\""));
++        assert!(lines[1].contains("\"failure_count\":1"));
++    }
++}
++

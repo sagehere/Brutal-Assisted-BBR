@@ -1,0 +1,200 @@
+name: P2 Observe Overhead Gate
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/netns/**"
+      - "tools/p2/preflight.sh"
+      - "tools/p2/apply-host-patches.sh"
+      - "阶段任务书/P1-冻结参数与用例.json"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-observe-overhead.yml"
+  workflow_dispatch:
+
+jobs:
+  overhead:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native and network dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake clang pkg-config perl nasm \
+            iproute2 iputils-ping iperf3
+
+      - name: Apply frozen-host Observe patches
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Build release tokio-quiche sender
+        run: |
+          cargo build \
+            --release \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p tokio-quiche \
+            --example async_http3_server \
+            --features gcongestion
+
+      - name: Build release quiche receiver
+        run: |
+          cargo build \
+            --release \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p quiche_apps \
+            --bin quiche-client
+
+      - name: Run persistent long-sample Observe CPU gate
+        id: persistent_cpu
+        continue-on-error: true
+        env:
+          BABR_RATE_MBIT: "500"
+          BABR_ONE_WAY_DELAY_MS: "5"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_CPU_PAIRS: "20"
+          BABR_P2_CPU_CONNECTIONS_PER_SAMPLE: "6"
+          BABR_P2_CPU_FLOW_BYTES: "268435456"
+          BABR_P2_CPU_WARMUP_BYTES: "67108864"
+          BABR_P2_CPU_LIMIT_RATIO: "0.02"
+          BABR_P2_CPU_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-cpu-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-cpu-persistent.sh
+
+      - name: Run real-network CPU diagnostic and Log60 evidence
+        env:
+          BABR_RATE_MBIT: "100"
+          BABR_ONE_WAY_DELAY_MS: "20"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_OVERHEAD_PAIRS: "10"
+          BABR_P2_OVERHEAD_WARMUP_BYTES: "67108864"
+          BABR_P2_OVERHEAD_FLOW_BYTES: "268435456"
+          BABR_P2_LOG_FLOW_BYTES: "805306368"
+          BABR_P2_OVERHEAD_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-overhead-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-overhead.sh
+
+      - name: Run multi-connection Observe memory slope evidence
+        id: memory_slope
+        continue-on-error: true
+        env:
+          BABR_RATE_MBIT: "100"
+          BABR_ONE_WAY_DELAY_MS: "20"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_MEMORY_PAIRS: "20"
+          BABR_P2_MEMORY_CONNECTIONS: "32"
+          BABR_P2_MEMORY_FLOW_BYTES: "2097152"
+          BABR_P2_MEMORY_LIMIT_BYTES: "262144"
+          BABR_P2_MEMORY_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-memory-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-memory-slope.sh
+
+      - name: Aggregate frozen Observe resource gate
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          cpu_path = Path("阶段任务书/p2-observe-cpu-artifacts/cpu-summary.json")
+          cpu_log_path = Path("阶段任务书/p2-observe-overhead-artifacts/cpu-log-summary.json")
+          memory_path = Path("阶段任务书/p2-observe-memory-artifacts/memory-summary.json")
+          out_path = Path("阶段任务书/p2-observe-resource-gate-summary.json")
+
+          if not cpu_path.exists():
+              raise SystemExit(f"missing persistent CPU summary: {cpu_path}")
+          if not cpu_log_path.exists():
+              raise SystemExit(f"missing real-network Log60 summary: {cpu_log_path}")
+          if not memory_path.exists():
+              raise SystemExit(f"missing memory slope summary: {memory_path}")
+
+          cpu = json.loads(cpu_path.read_text(encoding="utf-8"))
+          cpu_log = json.loads(cpu_log_path.read_text(encoding="utf-8"))
+          memory = json.loads(memory_path.read_text(encoding="utf-8"))
+
+          summary = {
+              "schema": "p2-observe-resource-gate-v3",
+              "cpu_metric": cpu["metric"],
+              "cpu_p95_overhead_ratio": cpu["p95_cpu_overhead_ratio"],
+              "cpu_median_overhead_ratio": cpu["median_cpu_overhead_ratio"],
+              "cpu_limit_ratio": cpu["limit_ratio"],
+              "cpu_pass": cpu["cpu_pass"],
+              "real_network_cpu_p95_diagnostic": cpu_log[
+                  "cpu_p95_overhead_ratio"
+              ],
+              "memory_p95_incremental_bytes_per_connection": memory[
+                  "p95_incremental_bytes_per_connection"
+              ],
+              "memory_limit_bytes_per_connection": memory[
+                  "limit_bytes_per_connection"
+              ],
+              "memory_pass": memory["memory_pass"],
+              "max_rolling_60s_serialized_bytes": cpu_log[
+                  "max_rolling_60s_serialized_bytes"
+              ],
+              "log_limit_bytes_per_60s": cpu_log["log_limit_bytes_per_60s"],
+              "log_pass": cpu_log["log_pass"],
+          }
+          summary["gate_pass"] = (
+              summary["cpu_pass"] and
+              summary["memory_pass"] and
+              summary["log_pass"]
+          )
+          out_path.write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(summary, sort_keys=True))
+          if not summary["gate_pass"]:
+              raise SystemExit("P2 Observe resource gate failed")
+          PY
+
+      - name: Show resource-gate summary
+        if: always()
+        run: |
+          for f in \
+            阶段任务书/p2-observe-cpu-artifacts/cpu-summary.json \
+            阶段任务书/p2-observe-overhead-artifacts/overhead-summary.json \
+            阶段任务书/p2-observe-overhead-artifacts/log60-summary.json \
+            阶段任务书/p2-observe-overhead-artifacts/cpu-log-summary.json \
+            阶段任务书/p2-observe-memory-artifacts/memory-summary.json \
+            阶段任务书/p2-observe-resource-gate-summary.json
+          do
+            if [[ -f "$f" ]]; then
+              echo "===== $f ====="
+              cat "$f"
+            fi
+          done
+
+      - name: Upload Observe overhead evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-observe-overhead-${{ github.sha }}
+          path: |
+            阶段任务书/p2-observe-cpu-artifacts
+            阶段任务书/p2-observe-overhead-artifacts
+            阶段任务书/p2-observe-memory-artifacts
+            阶段任务书/p2-observe-resource-gate-summary.json
+          if-no-files-found: error

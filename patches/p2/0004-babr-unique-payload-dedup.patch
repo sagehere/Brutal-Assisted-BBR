@@ -1,0 +1,146 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -431,5 +431,6 @@ pub struct GRecovery {
+     babr_transport_acked_bytes: u64,
+     babr_guard_counters: BabrTransportGuardCounters,
+     babr_actual_socket_sent_bytes: u64,
++    babr_unique_payload_delivered_bytes: u64,
+ 
+     pub bytes_lost: u64,
+@@ -471,7 +472,9 @@ impl GRecovery {
+             recovery_packet_bytes_sent: self.bytes_sent as u64,
+             transport_acked_bytes: self.babr_transport_acked_bytes,
+             transport_lost_bytes: self.babr_guard_counters.loss_bytes,
+-            unique_payload_delivered_bytes: None,
++            unique_payload_delivered_bytes: Some(
++                self.babr_unique_payload_delivered_bytes,
++            ),
+             actual_socket_sent_bytes: Some(
+                 self.babr_actual_socket_sent_bytes,
+             ),
+@@ -502,5 +505,9 @@ impl GRecovery {
+             .saturating_add(bytes as u64);
+     }
+ 
++    pub(crate) fn babr_set_unique_payload_delivered_total(&mut self, total: u64) {
++        self.babr_unique_payload_delivered_bytes = total;
++    }
++
+     /// Path identity must come from the connection/path layer. Recovery does
+     /// not infer migration from RTT changes.
+@@ -559,4 +568,5 @@ impl GRecovery {
+             babr_transport_acked_bytes: 0,
+             babr_guard_counters: Default::default(),
+             babr_actual_socket_sent_bytes: 0,
++            babr_unique_payload_delivered_bytes: 0,
+             bytes_lost: 0,
+@@ -1248,5 +1258,5 @@ mod tests {
+         assert_eq!(snapshot.accounting.recovery_packet_bytes_sent, 0);
+         assert_eq!(snapshot.accounting.transport_acked_bytes, 0);
+         assert_eq!(snapshot.accounting.transport_lost_bytes, 0);
+-        assert_eq!(snapshot.accounting.unique_payload_delivered_bytes, None);
++        assert_eq!(snapshot.accounting.unique_payload_delivered_bytes, Some(0));
+         assert_eq!(snapshot.accounting.actual_socket_sent_bytes, Some(0));
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -480,5 +480,13 @@ impl Recovery {
+             recovery.babr_on_socket_sent(bytes);
+         }
+     }
+ 
++    pub(crate) fn babr_set_unique_payload_delivered_total(
++        &mut self, total: u64,
++    ) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_set_unique_payload_delivered_total(total);
++        }
++    }
++
+     #[cfg(feature = "qlog")]
+diff --git a/quiche/src/stream/send_buf.rs b/quiche/src/stream/send_buf.rs
+--- a/quiche/src/stream/send_buf.rs
++++ b/quiche/src/stream/send_buf.rs
+@@ -550,4 +550,12 @@ impl<F: BufFactory> SendBuf<F> {
+         }
+     }
+ 
++    /// Total uniquely acknowledged STREAM payload represented by the
++    /// transport's existing ACK RangeSet.
++    pub(crate) fn babr_acked_payload_bytes(&self) -> u64 {
++        self.acked
++            .iter()
++            .fold(0_u64, |n, r| n.saturating_add(r.end - r.start))
++    }
++
+     /// Returns the outgoing flow control capacity.
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -1435,4 +1509,9 @@ pub struct Connection<F = DefaultBufFactory>
+     /// Total number of bytes sent lost over the connection.
+     lost_bytes: u64,
+ 
++    /// BABR Observe-only cumulative unique STREAM delivery total.
++    babr_unique_payload_delivered_bytes: u64,
++    /// True only while Observe accounting is enabled for this connection.
++    babr_observe_accounting_enabled: bool,
++
+     /// Streams map, indexed by stream ID.
+@@ -2099,4 +2176,6 @@ impl<F: BufFactory> Connection<F> {
+             acked_bytes: 0,
+             lost_bytes: 0,
++            babr_unique_payload_delivered_bytes: 0,
++            babr_observe_accounting_enabled: false,
+ 
+             rx_data: 0,
+@@ -3592,7 +3670,9 @@ impl<F: BufFactory> Connection<F> {
+                     frame::Frame::StreamHeader {
+                         stream_id,
+                         offset,
+                         length,
+                         ..
+                     } => {
++                        let babr_account_unique =
++                            self.babr_observe_accounting_enabled;
+                         // Emit qlog before checking if the stream still exists.
+@@ -3620,5 +3698,13 @@ impl<F: BufFactory> Connection<F> {
+                             None => continue,
+                         };
+ 
++                        let unique_before = babr_account_unique
++                            .then(|| stream.send.babr_acked_payload_bytes());
+                         let dropped = stream.send.ack_and_drop(offset, length);
++                        let unique_delta = unique_before.map_or(0, |before| {
++                            stream
++                                .send
++                                .babr_acked_payload_bytes()
++                                .saturating_sub(before)
++                        });
+                         let priority_key = Arc::clone(&stream.priority_key);
+@@ -3665,5 +3751,9 @@ impl<F: BufFactory> Connection<F> {
+                         if dropped > 0 {
+                             self.streams.sub_tx_buffered(dropped);
+                         }
++
++                        self.babr_unique_payload_delivered_bytes = self
++                            .babr_unique_payload_delivered_bytes
++                            .saturating_add(unique_delta);
+                     },
+ 
+@@ -3723,5 +3805,14 @@ impl<F: BufFactory> Connection<F> {
+                 }
+             }
+         }
+ 
++        let babr_unique_payload_total =
++            self.babr_unique_payload_delivered_bytes;
++        for (_, p) in self.paths.iter_mut() {
++            p.recovery
++                .babr_set_unique_payload_delivered_total(
++                    babr_unique_payload_total,
++                );
++        }
++
+         // Now that we processed all the frames, if there is a path that has no

@@ -1,0 +1,249 @@
+diff --git a/quiche/src/recovery/gcongestion/bbr2.rs b/quiche/src/recovery/gcongestion/bbr2.rs
+--- a/quiche/src/recovery/gcongestion/bbr2.rs
++++ b/quiche/src/recovery/gcongestion/bbr2.rs
+@@ -35,4 +35,5 @@ use crate::recovery::RecoveryStats;
+ 
++use self::mode::CyclePhase;
+ use self::mode::Mode;
+ use self::mode::ModeImpl;
+ 
+@@ -47,5 +48,64 @@ use super::RttStats;
+ 
+ const MAX_MODE_CHANGES_PER_CONGESTION_EVENT: usize = 4;
+ 
++/// Explicit BBRv2 phase exported only for BABR Observe telemetry.
++///
++/// This is intentionally independent from pacing gain so the BABR whitelist
++/// cannot infer a BBR phase from a numeric gain.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrBbrPhase {
++    Startup,
++    Drain,
++    ProbeBwNotStarted,
++    ProbeBwUp,
++    ProbeBwDown,
++    ProbeBwCruise,
++    ProbeBwRefill,
++    ProbeRtt,
++    Unknown,
++}
++
++impl BabrBbrPhase {
++    pub(crate) const fn as_str(self) -> &'static str {
++        match self {
++            Self::Startup => "Startup",
++            Self::Drain => "Drain",
++            Self::ProbeBwNotStarted => "ProbeBW.NotStarted",
++            Self::ProbeBwUp => "ProbeBW.Up",
++            Self::ProbeBwDown => "ProbeBW.Down",
++            Self::ProbeBwCruise => "ProbeBW.Cruise",
++            Self::ProbeBwRefill => "ProbeBW.Refill",
++            Self::ProbeRtt => "ProbeRTT",
++            Self::Unknown => "Unknown",
++        }
++    }
++
++    /// Frozen p1-baseline-v3 assist phase whitelist.
++    pub(crate) const fn assist_allowed(self) -> bool {
++        matches!(
++            self,
++            Self::ProbeBwRefill | Self::ProbeBwUp | Self::ProbeBwCruise
++        )
++    }
++}
++
++/// Read-only BBRv2 data used by BABR Observe.
++///
++/// No field in this snapshot is consumed by BBRv2 itself. Reading this value
++/// therefore cannot change pacing, CWND, send permission, or recovery.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrObserveSnapshot {
++    pub(crate) phase: BabrBbrPhase,
++    pub(crate) end_of_round_trip: bool,
++    pub(crate) baseline_pacing_rate_bytes_per_second: u64,
++    pub(crate) baseline_cwnd_bytes: usize,
++    pub(crate) model_delivery_rate_bytes_per_second: u64,
++    pub(crate) delivery_sample_valid: bool,
++    pub(crate) sample_max_bandwidth_bytes_per_second: Option<u64>,
++    pub(crate) sample_min_rtt_micros: Option<u64>,
++    pub(crate) sample_is_app_limited: bool,
++    pub(crate) loss_detected: bool,
++}
++
+ #[derive(Debug)]
+ struct Params {
+@@ -460,6 +525,11 @@ pub(crate) struct BBRv2 {
+     last_sample_is_app_limited: bool,
+     has_non_app_limited_sample: bool,
+     last_quiescence_start: Option<Instant>,
++    babr_last_end_of_round_trip: bool,
++    babr_last_sample_max_bandwidth: Option<Bandwidth>,
++    babr_last_sample_min_rtt: Option<Duration>,
++    babr_last_delivery_sample_valid: bool,
++    babr_last_loss_detected: bool,
+     params: Params,
+ }
+ 
+@@ -529,6 +599,11 @@ impl BBRv2 {
+             last_sample_is_app_limited: false,
+             has_non_app_limited_sample: false,
+             last_quiescence_start: None,
++            babr_last_end_of_round_trip: false,
++            babr_last_sample_max_bandwidth: None,
++            babr_last_sample_min_rtt: None,
++            babr_last_delivery_sample_valid: false,
++            babr_last_loss_detected: false,
+             mss: max_segment_size,
+             params,
+         }
+@@ -538,6 +613,45 @@ impl BBRv2 {
+         self.params.time_sent_set_to_now
+     }
+ 
++    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
++        let phase = match &self.mode {
++            Mode::Startup(_) => BabrBbrPhase::Startup,
++            Mode::Drain(_) => BabrBbrPhase::Drain,
++            Mode::ProbeBW(probe_bw) => match probe_bw.cycle.phase {
++                CyclePhase::NotStarted => BabrBbrPhase::ProbeBwNotStarted,
++                CyclePhase::Up => BabrBbrPhase::ProbeBwUp,
++                CyclePhase::Down => BabrBbrPhase::ProbeBwDown,
++                CyclePhase::Cruise => BabrBbrPhase::ProbeBwCruise,
++                CyclePhase::Refill => BabrBbrPhase::ProbeBwRefill,
++            },
++            Mode::ProbeRTT(_) => BabrBbrPhase::ProbeRtt,
++            Mode::Placheolder(_) => BabrBbrPhase::Unknown,
++        };
++
++        BabrObserveSnapshot {
++            phase,
++            end_of_round_trip: self.babr_last_end_of_round_trip,
++            baseline_pacing_rate_bytes_per_second: self
++                .pacing_rate
++                .to_bytes_per_second(),
++            baseline_cwnd_bytes: self.cwnd,
++            model_delivery_rate_bytes_per_second: self
++                .mode
++                .network_model()
++                .bandwidth_estimate()
++                .to_bytes_per_second(),
++            delivery_sample_valid: self.babr_last_delivery_sample_valid,
++            sample_max_bandwidth_bytes_per_second: self
++                .babr_last_sample_max_bandwidth
++                .map(Bandwidth::to_bytes_per_second),
++            sample_min_rtt_micros: self.babr_last_sample_min_rtt.map(|rtt| {
++                rtt.as_micros().min(u64::MAX as u128) as u64
++            }),
++            sample_is_app_limited: self.last_sample_is_app_limited,
++            loss_detected: self.babr_last_loss_detected,
++        }
++    }
++
+     fn on_exit_quiescence(&mut self, now: Instant) {
+         if let Some(last_quiescence_start) = self.last_quiescence_start.take() {
+             self.mode.do_on_exit_quiescence(
+@@ -738,6 +858,14 @@ impl CongestionControl for BBRv2 {
+         if !self.last_sample_is_app_limited {
+             self.has_non_app_limited_sample = true;
+         }
++
++        self.babr_last_end_of_round_trip = congestion_event.end_of_round_trip;
++        self.babr_last_sample_max_bandwidth =
++            congestion_event.sample_max_bandwidth;
++        self.babr_last_sample_min_rtt = congestion_event.sample_min_rtt;
++        self.babr_last_delivery_sample_valid =
++            congestion_event.sample_max_bandwidth.is_some();
++        self.babr_last_loss_detected = !lost_packets.is_empty();
+         if congestion_event.bytes_in_flight == 0 &&
+             self.params.avoid_unnecessary_probe_rtt
+         {
+@@ -846,4 +973,45 @@ mod tests {
+             (2.88499 * pacing_cwnd as f64) as u64
+         );
+     }
++
++    #[test]
++    fn babr_observe_snapshot_is_passive_and_starts_in_startup() {
++        const INIT_PACKET_SIZE: usize = 1200;
++        const INIT_WINDOW_PACKETS: usize = 10;
++        const MAX_WINDOW_PACKETS: usize = 10000;
++
++        let bbr2 = BBRv2::new(
++            INIT_WINDOW_PACKETS,
++            MAX_WINDOW_PACKETS,
++            INIT_PACKET_SIZE,
++            Duration::from_millis(100),
++            None,
++        );
++        let snapshot = bbr2.babr_observe_snapshot();
++
++        assert_eq!(snapshot.phase, BabrBbrPhase::Startup);
++        assert_eq!(snapshot.phase.as_str(), "Startup");
++        assert!(!snapshot.phase.assist_allowed());
++        assert!(!snapshot.end_of_round_trip);
++        assert_eq!(
++            snapshot.baseline_cwnd_bytes,
++            INIT_WINDOW_PACKETS * INIT_PACKET_SIZE
++        );
++        assert!(!snapshot.delivery_sample_valid);
++        assert!(!snapshot.loss_detected);
++    }
++
++    #[test]
++    fn babr_observe_phase_whitelist_matches_frozen_contract() {
++        assert!(BabrBbrPhase::ProbeBwRefill.assist_allowed());
++        assert!(BabrBbrPhase::ProbeBwUp.assist_allowed());
++        assert!(BabrBbrPhase::ProbeBwCruise.assist_allowed());
++
++        assert!(!BabrBbrPhase::Startup.assist_allowed());
++        assert!(!BabrBbrPhase::Drain.assist_allowed());
++        assert!(!BabrBbrPhase::ProbeBwDown.assist_allowed());
++        assert!(!BabrBbrPhase::ProbeRtt.assist_allowed());
++        assert!(!BabrBbrPhase::ProbeBwNotStarted.assist_allowed());
++        assert!(!BabrBbrPhase::Unknown.assist_allowed());
++    }
+ }
+diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
+--- a/quiche/src/recovery/gcongestion/pacer.rs
++++ b/quiche/src/recovery/gcongestion/pacer.rs
+@@ -29,6 +29,7 @@
+ 
+ use std::time::Instant;
+ 
++use crate::recovery::gcongestion::bbr2::BabrObserveSnapshot;
+ use crate::recovery::gcongestion::bbr2::BBRv2;
+ use crate::recovery::gcongestion::Bandwidth;
+ use crate::recovery::gcongestion::CongestionControl;
+@@ -96,6 +97,10 @@ impl Pacer {
+         self.sender.get_congestion_window()
+     }
+ 
++    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
++        self.sender.babr_observe_snapshot()
++    }
++
+     pub fn on_packet_sent(
+         &mut self, sent_time: Instant, bytes_in_flight: usize,
+         packet_number: u64, bytes: usize, is_retransmissible: bool,
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -54,5 +54,6 @@ use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
+ 
+-use super::bbr2::BBRv2;
++use super::bbr2::BabrObserveSnapshot;
++use super::bbr2::BBRv2;
+ use super::pacer::Pacer;
+ use super::Acked;
+ use super::Lost;
+@@ -348,6 +349,10 @@ impl GRecovery {
+         self.pacer.ack_rate().unwrap_or(Bandwidth::zero())
+     }
+ 
++    pub(crate) fn babr_observe_snapshot(&self) -> BabrObserveSnapshot {
++        self.pacer.babr_observe_snapshot()
++    }
++
+     pub fn new(recovery_config: &RecoveryConfig) -> Option<Self> {
+         let cc = match recovery_config.cc_algorithm {
+             CongestionControlAlgorithm::Bbr2Gcongestion => BBRv2::new(

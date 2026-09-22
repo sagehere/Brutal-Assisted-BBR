@@ -1,0 +1,149 @@
+diff --git a/quiche/src/recovery/gcongestion/pacer.rs b/quiche/src/recovery/gcongestion/pacer.rs
+--- a/quiche/src/recovery/gcongestion/pacer.rs
++++ b/quiche/src/recovery/gcongestion/pacer.rs
+@@ -65,9 +65,12 @@
+     enabled: bool,
+     /// Underlying sender
+     sender: BBRv2,
+-    /// The maximum rate the [`Pacer`] will use.
+-    max_pacing_rate: Option<Bandwidth>,
+-    /// Number of unpaced packets to be sent before packets are delayed.
++    /// The maximum rate the [`Pacer`] will use.
++    max_pacing_rate: Option<Bandwidth>,
++    /// Optional BABR online policy cap. It composes with, and can never relax,
++    /// the host-configured maximum above.
++    babr_policy_rate_cap: Option<Bandwidth>,
++    /// Number of unpaced packets to be sent before packets are delayed.
+     burst_tokens: usize,
+     /// When can the next packet be sent.
+     ideal_next_packet_send_time: ReleaseTime,
+@@ -88,10 +91,11 @@
+         enabled: bool, congestion: BBRv2, max_pacing_rate: Option<Bandwidth>,
+     ) -> Self {
+         Pacer {
+-            enabled,
+-            sender: congestion,
+-            max_pacing_rate,
+-            burst_tokens: INITIAL_UNPACED_BURST,
++            enabled,
++            sender: congestion,
++            max_pacing_rate,
++            babr_policy_rate_cap: None,
++            burst_tokens: INITIAL_UNPACED_BURST,
+             ideal_next_packet_send_time: ReleaseTime::Immediate,
+             initial_burst_size: INITIAL_UNPACED_BURST,
+             lumpy_tokens: 0,
+@@ -133,17 +137,33 @@
+     /// The normal Off/Observe path does not call this helper, so the existing
+     /// [`pacing_rate`] hot path remains byte-for-byte unchanged. Host
+     /// `max_pacing_rate` is still the final clamp.
+-    pub(crate) fn babr_lite_effective_pacing_rate(
+-        &self, requested_rate_bytes_per_second: u64,
+-    ) -> Bandwidth {
+-        let requested =
+-            Bandwidth::from_bytes_per_second(requested_rate_bytes_per_second);
+-
+-        match self.max_pacing_rate {
+-            Some(rate) if self.enabled => rate.min(requested),
+-            _ => requested,
+-        }
+-    }
++    pub(crate) fn babr_lite_effective_pacing_rate(
++        &self, requested_rate_bytes_per_second: u64,
++    ) -> Bandwidth {
++        let requested =
++            Bandwidth::from_bytes_per_second(requested_rate_bytes_per_second);
++
++        match self.effective_rate_cap() {
++            Some(rate) if self.enabled => rate.min(requested),
++            _ => requested,
++        }
++    }
++
++    fn effective_rate_cap(&self) -> Option<Bandwidth> {
++        match (self.max_pacing_rate, self.babr_policy_rate_cap) {
++            (Some(host), Some(policy)) => Some(host.min(policy)),
++            (Some(host), None) => Some(host),
++            (None, Some(policy)) => Some(policy),
++            (None, None) => None,
++        }
++    }
++
++    pub(crate) fn babr_set_policy_rate_cap_bytes_per_second(
++        &mut self, max_rate: Option<u64>,
++    ) {
++        self.babr_policy_rate_cap =
++            max_rate.map(Bandwidth::from_bytes_per_second);
++    }
+ 
+     pub fn on_packet_sent(
+         &mut self, sent_time: Instant, bytes_in_flight: usize,
+@@ -300,15 +320,15 @@
+         self.sender.on_retransmission_timeout(packets_retransmitted)
+     }
+ 
+-    pub fn pacing_rate(
+-        &self, bytes_in_flight: usize, rtt_stats: &RttStats,
+-    ) -> Bandwidth {
+-        let sender_rate = self.sender.pacing_rate(bytes_in_flight, rtt_stats);
+-        match self.max_pacing_rate {
+-            Some(rate) if self.enabled => rate.min(sender_rate),
+-            _ => sender_rate,
+-        }
+-    }
++    pub fn pacing_rate(
++        &self, bytes_in_flight: usize, rtt_stats: &RttStats,
++    ) -> Bandwidth {
++        let sender_rate = self.sender.pacing_rate(bytes_in_flight, rtt_stats);
++        match self.effective_rate_cap() {
++            Some(rate) if self.enabled => rate.min(sender_rate),
++            _ => sender_rate,
++        }
++    }
+ 
+     pub fn bandwidth_estimate(&self, rtt_stats: &RttStats) -> Bandwidth {
+         self.sender.bandwidth_estimate(rtt_stats)
+@@ -409,8 +429,41 @@
+         assert_eq!(pacer.get_congestion_window(), baseline_cwnd);
+     }
+ 
+-    #[test]
+-    fn babr_lite_rate_changes_only_release_schedule() {
++    #[test]
++    fn online_policy_cap_clamps_baseline_and_lite_without_relaxing_host_cap() {
++        let host_max = Bandwidth::from_bytes_per_second(1_000_000);
++        let mut pacer = Pacer::new(true, sender(), Some(host_max));
++        let rtt = rtt_stats();
++
++        pacer.babr_set_policy_rate_cap_bytes_per_second(Some(2_000_000));
++        let baseline_with_host_cap = pacer.pacing_rate(0, &rtt);
++        assert!(baseline_with_host_cap <= host_max);
++        assert_eq!(
++            pacer.babr_lite_effective_pacing_rate(10_000_000),
++            host_max,
++        );
++
++        let tighter = Bandwidth::from_bytes_per_second(500_000);
++        pacer.babr_set_policy_rate_cap_bytes_per_second(Some(500_000));
++        assert_eq!(
++            pacer.pacing_rate(0, &rtt),
++            baseline_with_host_cap.min(tighter),
++        );
++        assert_eq!(
++            pacer.babr_lite_effective_pacing_rate(10_000_000),
++            tighter,
++        );
++
++        pacer.babr_set_policy_rate_cap_bytes_per_second(None);
++        assert_eq!(pacer.pacing_rate(0, &rtt), baseline_with_host_cap);
++        assert_eq!(
++            pacer.babr_lite_effective_pacing_rate(10_000_000),
++            host_max,
++        );
++    }
++
++    #[test]
++    fn babr_lite_rate_changes_only_release_schedule() {
+         let rtt = rtt_stats();
+         let mut baseline = Pacer::new(true, sender(), None);
+         let mut lite = Pacer::new(true, sender(), None);

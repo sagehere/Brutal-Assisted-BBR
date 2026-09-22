@@ -1,0 +1,928 @@
+diff --git a/quiche/src/recovery/gcongestion/mod.rs b/quiche/src/recovery/gcongestion/mod.rs
+--- a/quiche/src/recovery/gcongestion/mod.rs
++++ b/quiche/src/recovery/gcongestion/mod.rs
+@@ -26,6 +26,7 @@
+ 
+ mod bbr;
+ mod bbr2;
++mod babr_lite;
+ mod babr_telemetry;
+ pub mod pacer;
+ mod recovery;
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+new file mode 100644
+--- /dev/null
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -0,0 +1,912 @@
++// Copyright (C) 2024, Cloudflare, Inc.
++// All rights reserved.
++//
++// BABR P2 Lite controller core.
++//
++// This module owns only deterministic controller state. It does not directly
++// mutate BBRv2, pacing, CWND, packet admission, or socket output. Integration
++// with the Pacer is a separate M3 step after these frozen rules are verified.
++
++use std::time::Duration;
++use std::time::Instant;
++
++use super::babr_telemetry::BabrReasonCode;
++use super::bbr2::BabrBbrPhase;
++
++const TARGET_MIN_BYTES_PER_SECOND: u64 = 1_000_000;
++const TARGET_MAX_BYTES_PER_SECOND: u64 = 125_000_000;
++const TARGET_ENTER_NUMERATOR: u64 = 4;
++const TARGET_ENTER_DENOMINATOR: u64 = 5;
++const TARGET_EXIT_NUMERATOR: u64 = 9;
++const TARGET_EXIT_DENOMINATOR: u64 = 10;
++
++const MAX_RELATIVE_RATE_GAIN_NUMERATOR: u64 = 11;
++const MAX_RELATIVE_RATE_GAIN_DENOMINATOR: u64 = 10;
++
++// W advances by exactly 0.05 per BBR packet-timed round.
++const WEIGHT_DENOMINATOR: u8 = 20;
++const MAX_ASSIST_ROUNDS: u8 = 3;
++const NO_BENEFIT_ROUND: u8 = 2;
++const SAMPLE_MAX_AGE_ROUNDS: u8 = 1;
++const MINIMUM_MODEL_GAIN_NUMERATOR: u64 = 102;
++const MINIMUM_MODEL_GAIN_DENOMINATOR: u64 = 100;
++const MAX_ASSIST_DURATION: Duration = Duration::from_millis(300);
++const BACKOFF_BASE_MS: u64 = 30_000;
++const BACKOFF_MAX_MS: u64 = 600_000;
++
++const SOFT_QUEUE_DELAY_MIN: Duration = Duration::from_millis(10);
++const HARD_QUEUE_DELAY_MIN: Duration = Duration::from_millis(20);
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrMode {
++    Off,
++    Observe,
++    Lite,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrLiteState {
++    Baseline,
++    Assist,
++    AssistBackoff,
++}
++
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct BabrLiteInput {
++    pub(crate) now: Instant,
++    pub(crate) phase: BabrBbrPhase,
++    pub(crate) end_of_round_trip: bool,
++    pub(crate) baseline_pacing_rate_bytes_per_second: u64,
++    pub(crate) baseline_cwnd_bytes: usize,
++    pub(crate) model_delivery_rate_bytes_per_second: u64,
++    pub(crate) sample_valid: bool,
++    pub(crate) sample_age_rounds: u8,
++    pub(crate) srtt: Duration,
++    pub(crate) min_rtt: Duration,
++    pub(crate) path_changed: bool,
++    pub(crate) app_limited: bool,
++    pub(crate) receiver_limited: bool,
++    pub(crate) policy_limited: bool,
++    pub(crate) loss_detected: bool,
++    pub(crate) pto_fired: bool,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct BabrLiteDecision {
++    pub(crate) state: BabrLiteState,
++    pub(crate) reason: BabrReasonCode,
++    pub(crate) shadow_reason: BabrReasonCode,
++    pub(crate) weight_steps: u8,
++    pub(crate) candidate_pacing_rate_bytes_per_second: u64,
++    pub(crate) final_pacing_rate_bytes_per_second: u64,
++    pub(crate) final_cwnd_bytes: usize,
++    pub(crate) control_applied: bool,
++    pub(crate) soft_guard: bool,
++    pub(crate) hard_guard: bool,
++}
++
++#[derive(Debug)]
++pub(crate) struct BabrLiteController {
++    mode: BabrMode,
++    target_bytes_per_second: u64,
++    max_rate_bytes_per_second: Option<u64>,
++    state: BabrLiteState,
++    weight_steps: u8,
++    rounds: u8,
++    reference_rate_bytes_per_second: Option<u64>,
++    assist_deadline: Option<Instant>,
++    failure_count: u32,
++    backoff_deadline: Option<Instant>,
++}
++
++impl Default for BabrLiteController {
++    fn default() -> Self {
++        Self {
++            mode: BabrMode::Off,
++            target_bytes_per_second: 0,
++            max_rate_bytes_per_second: None,
++            state: BabrLiteState::Baseline,
++            weight_steps: 0,
++            rounds: 0,
++            reference_rate_bytes_per_second: None,
++            assist_deadline: None,
++            failure_count: 0,
++            backoff_deadline: None,
++        }
++    }
++}
++
++impl BabrLiteController {
++    pub(crate) fn mode(&self) -> BabrMode {
++        self.mode
++    }
++
++    pub(crate) fn set_mode(&mut self, mode: BabrMode) {
++        if mode != self.mode {
++            self.mode = mode;
++            self.enter_baseline();
++        }
++    }
++
++    pub(crate) fn set_target_bytes_per_second(&mut self, target: u64) -> bool {
++        if target == 0 ||
++            (TARGET_MIN_BYTES_PER_SECOND..=TARGET_MAX_BYTES_PER_SECOND)
++                .contains(&target)
++        {
++            self.target_bytes_per_second = target;
++            true
++        } else {
++            false
++        }
++    }
++
++    pub(crate) fn set_max_rate_bytes_per_second(&mut self, max_rate: Option<u64>) {
++        self.max_rate_bytes_per_second = max_rate;
++    }
++
++    fn clear_assist_round(&mut self) {
++        self.weight_steps = 0;
++        self.rounds = 0;
++        self.reference_rate_bytes_per_second = None;
++        self.assist_deadline = None;
++    }
++
++    fn enter_baseline(&mut self) {
++        self.state = BabrLiteState::Baseline;
++        self.clear_assist_round();
++    }
++
++    fn enter_backoff(&mut self, now: Instant) {
++        self.failure_count = self.failure_count.saturating_add(1);
++        let shift = self.failure_count.saturating_sub(1).min(31);
++        let multiplier = 1u64 << shift;
++        let backoff_ms = BACKOFF_BASE_MS
++            .saturating_mul(multiplier)
++            .min(BACKOFF_MAX_MS);
++
++        self.state = BabrLiteState::AssistBackoff;
++        self.clear_assist_round();
++        self.backoff_deadline =
++            Some(now + Duration::from_millis(backoff_ms));
++    }
++
++    fn backoff_active(&mut self, now: Instant) -> bool {
++        if let Some(deadline) = self.backoff_deadline {
++            if now < deadline {
++                self.state = BabrLiteState::AssistBackoff;
++                self.clear_assist_round();
++                return true;
++            }
++
++            self.backoff_deadline = None;
++            if self.state == BabrLiteState::AssistBackoff {
++                self.state = BabrLiteState::Baseline;
++            }
++        }
++
++        false
++    }
++
++    fn baseline_decision(
++        &self, input: BabrLiteInput, reason: BabrReasonCode,
++        shadow_reason: BabrReasonCode, soft_guard: bool, hard_guard: bool,
++    ) -> BabrLiteDecision {
++        let baseline_pacing_rate_bytes_per_second =
++            self.max_rate_bytes_per_second.map_or(
++                input.baseline_pacing_rate_bytes_per_second,
++                |max_rate| {
++                    input.baseline_pacing_rate_bytes_per_second.min(max_rate)
++                },
++            );
++
++        BabrLiteDecision {
++            state: self.state,
++            reason,
++            shadow_reason,
++            weight_steps: self.weight_steps,
++            candidate_pacing_rate_bytes_per_second:
++                baseline_pacing_rate_bytes_per_second,
++            final_pacing_rate_bytes_per_second:
++                baseline_pacing_rate_bytes_per_second,
++            final_cwnd_bytes: input.baseline_cwnd_bytes,
++            control_applied: false,
++            soft_guard,
++            hard_guard,
++        }
++    }
++
++    fn output_reason(&self, reason: BabrReasonCode) -> BabrReasonCode {
++        if self.mode == BabrMode::Observe {
++            BabrReasonCode::ModeNotLite
++        } else {
++            reason
++        }
++    }
++
++    fn target_reason(&self) -> Option<BabrReasonCode> {
++        if self.target_bytes_per_second == 0 {
++            return Some(BabrReasonCode::TargetDisabled);
++        }
++
++        if !(TARGET_MIN_BYTES_PER_SECOND..=TARGET_MAX_BYTES_PER_SECOND)
++            .contains(&self.target_bytes_per_second)
++        {
++            return Some(BabrReasonCode::InvalidTarget);
++        }
++
++        if self
++            .max_rate_bytes_per_second
++            .is_some_and(|max_rate| max_rate < self.target_bytes_per_second)
++        {
++            return Some(BabrReasonCode::PolicyLimited);
++        }
++
++        None
++    }
++
++    fn guard_reason(
++        &self, input: BabrLiteInput,
++    ) -> (Option<BabrReasonCode>, bool, bool) {
++        if input.path_changed {
++            return (Some(BabrReasonCode::PathChanged), false, false);
++        }
++        if input.app_limited {
++            return (Some(BabrReasonCode::AppLimited), false, false);
++        }
++        if input.receiver_limited {
++            return (Some(BabrReasonCode::ReceiverLimited), false, false);
++        }
++        if input.policy_limited {
++            return (Some(BabrReasonCode::PolicyLimited), false, false);
++        }
++        if input.loss_detected {
++            return (Some(BabrReasonCode::LossDetected), false, false);
++        }
++        if input.pto_fired {
++            return (Some(BabrReasonCode::PtoFired), false, false);
++        }
++        if !input.phase.assist_allowed() {
++            return (Some(BabrReasonCode::BbrPhaseProtected), false, false);
++        }
++        if !input.sample_valid ||
++            input.sample_age_rounds > SAMPLE_MAX_AGE_ROUNDS ||
++            input.model_delivery_rate_bytes_per_second == 0
++        {
++            return (Some(BabrReasonCode::SampleInvalid), false, false);
++        }
++
++        let qdelay = input.srtt.saturating_sub(input.min_rtt);
++        let soft_threshold =
++            SOFT_QUEUE_DELAY_MIN.max(input.min_rtt / 4);
++        let hard_threshold =
++            HARD_QUEUE_DELAY_MIN.max(input.min_rtt / 2);
++        let soft = qdelay >= soft_threshold;
++        let hard = qdelay >= hard_threshold;
++
++        if hard {
++            return (Some(BabrReasonCode::HardQueueDelay), soft, hard);
++        }
++
++        (None, soft, hard)
++    }
++
++    pub(crate) fn on_round(
++        &mut self, input: BabrLiteInput,
++    ) -> BabrLiteDecision {
++        if let Some(reason) = self.target_reason() {
++            self.enter_baseline();
++            return self.baseline_decision(
++                input,
++                self.output_reason(reason),
++                reason,
++                false,
++                false,
++            );
++        }
++
++        if self.mode == BabrMode::Off {
++            self.enter_baseline();
++            return self.baseline_decision(
++                input,
++                BabrReasonCode::ModeNotLite,
++                BabrReasonCode::ModeNotLite,
++                false,
++                false,
++            );
++        }
++
++        let (guard_reason, soft_guard, hard_guard) =
++            self.guard_reason(input);
++        if let Some(reason) = guard_reason {
++            match reason {
++                BabrReasonCode::LossDetected |
++                BabrReasonCode::PtoFired |
++                BabrReasonCode::HardQueueDelay => {
++                    self.enter_backoff(input.now);
++                },
++                _ => self.enter_baseline(),
++            }
++
++            return self.baseline_decision(
++                input,
++                self.output_reason(reason),
++                reason,
++                soft_guard,
++                hard_guard,
++            );
++        }
++
++        if self.backoff_active(input.now) {
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::BackoffActive),
++                BabrReasonCode::BackoffActive,
++                false,
++                false,
++            );
++        }
++
++        // Frozen target hysteresis: BASELINE may enter only below 0.8T.
++        // Once ASSIST is active, the separate 0.9T exit threshold below
++        // controls withdrawal so the 0.8T..0.9T band preserves state.
++        if self.state != BabrLiteState::Assist {
++            let enter_threshold = self
++                .target_bytes_per_second
++                .saturating_mul(TARGET_ENTER_NUMERATOR) /
++                TARGET_ENTER_DENOMINATOR;
++            if input.model_delivery_rate_bytes_per_second >= enter_threshold {
++                self.enter_baseline();
++                return self.baseline_decision(
++                    input,
++                    self.output_reason(BabrReasonCode::TargetNear),
++                    BabrReasonCode::TargetNear,
++                    false,
++                    false,
++                );
++            }
++        }
++
++        if self.state != BabrLiteState::Assist ||
++            self.reference_rate_bytes_per_second.is_none()
++        {
++            self.state = BabrLiteState::Assist;
++            self.reference_rate_bytes_per_second =
++                Some(input.model_delivery_rate_bytes_per_second);
++            self.assist_deadline = input.now.checked_add(MAX_ASSIST_DURATION);
++            self.rounds = 0;
++            self.weight_steps = 0;
++        }
++
++        let reference_rate = self.reference_rate_bytes_per_second.unwrap();
++        let deadline = self.assist_deadline.unwrap_or(input.now);
++
++        if input.now >= deadline {
++            self.enter_backoff(input.now);
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::AssistTimeout),
++                BabrReasonCode::AssistTimeout,
++                false,
++                false,
++            );
++        }
++
++        // ACKs are not a control clock. Only a real BBR packet-timed round may
++        // consume a round budget or advance W.
++        if !input.end_of_round_trip {
++            let target_near_threshold = self
++                .target_bytes_per_second
++                .saturating_mul(TARGET_EXIT_NUMERATOR) /
++                TARGET_EXIT_DENOMINATOR;
++            if input.model_delivery_rate_bytes_per_second >=
++                target_near_threshold
++            {
++                self.enter_baseline();
++                return self.baseline_decision(
++                    input,
++                    self.output_reason(BabrReasonCode::TargetNear),
++                    BabrReasonCode::TargetNear,
++                    false,
++                    false,
++                );
++            }
++
++            let reason = if soft_guard {
++                BabrReasonCode::SoftFreeze
++            } else {
++                BabrReasonCode::BoundedProbe
++            };
++            return self.decision_for_current_weight(
++                input, reference_rate, reason, soft_guard, hard_guard,
++            );
++        }
++
++        self.rounds = self.rounds.saturating_add(1);
++
++        // "Already 3 BBR rounds" ends the assist at the third round boundary.
++        // Do not leave an assist increment active until a fourth round arrives.
++        if self.rounds >= MAX_ASSIST_ROUNDS {
++            self.enter_backoff(input.now);
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::MaxRounds),
++                BabrReasonCode::MaxRounds,
++                false,
++                false,
++            );
++        }
++
++        if self.rounds >= NO_BENEFIT_ROUND &&
++            input.model_delivery_rate_bytes_per_second
++                .saturating_mul(MINIMUM_MODEL_GAIN_DENOMINATOR) <
++            reference_rate.saturating_mul(MINIMUM_MODEL_GAIN_NUMERATOR)
++        {
++            self.enter_backoff(input.now);
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::NoBenefit),
++                BabrReasonCode::NoBenefit,
++                false,
++                false,
++            );
++        }
++
++        let target_near_threshold = self
++            .target_bytes_per_second
++            .saturating_mul(TARGET_EXIT_NUMERATOR) /
++            TARGET_EXIT_DENOMINATOR;
++        if input.model_delivery_rate_bytes_per_second >=
++            target_near_threshold
++        {
++            self.enter_baseline();
++            return self.baseline_decision(
++                input,
++                self.output_reason(BabrReasonCode::TargetNear),
++                BabrReasonCode::TargetNear,
++                false,
++                false,
++            );
++        }
++
++        let reason = if soft_guard {
++            BabrReasonCode::SoftFreeze
++        } else {
++            self.weight_steps =
++                self.weight_steps.saturating_add(1).min(WEIGHT_DENOMINATOR);
++            BabrReasonCode::BoundedProbe
++        };
++
++        self.decision_for_current_weight(
++            input, reference_rate, reason, soft_guard, hard_guard,
++        )
++    }
++
++    fn decision_for_current_weight(
++        &self, input: BabrLiteInput, reference_rate: u64,
++        reason: BabrReasonCode, soft_guard: bool, hard_guard: bool,
++    ) -> BabrLiteDecision {
++        let relative_cap = reference_rate
++            .saturating_mul(MAX_RELATIVE_RATE_GAIN_NUMERATOR) /
++            MAX_RELATIVE_RATE_GAIN_DENOMINATOR;
++        let mut pacing_cap =
++            self.target_bytes_per_second.min(relative_cap);
++
++        if let Some(max_rate) = self.max_rate_bytes_per_second {
++            pacing_cap = pacing_cap.min(max_rate);
++        }
++
++        let delta = pacing_cap.saturating_sub(reference_rate);
++        let candidate = reference_rate.saturating_add(
++            delta.saturating_mul(self.weight_steps as u64) /
++                WEIGHT_DENOMINATOR as u64,
++        );
++
++        let baseline_pacing_rate_bytes_per_second =
++            self.max_rate_bytes_per_second.map_or(
++                input.baseline_pacing_rate_bytes_per_second,
++                |max_rate| {
++                    input.baseline_pacing_rate_bytes_per_second.min(max_rate)
++                },
++            );
++        // Frozen invariant: W=0 publishes the host BBR pacing output, not
++        // the frozen B_ref. A candidate may still be observed in shadow mode.
++        let control_applied =
++            self.mode == BabrMode::Lite && self.weight_steps > 0;
++        BabrLiteDecision {
++            state: self.state,
++            reason: self.output_reason(reason),
++            shadow_reason: reason,
++            weight_steps: self.weight_steps,
++            candidate_pacing_rate_bytes_per_second: candidate,
++            final_pacing_rate_bytes_per_second: if control_applied {
++                candidate
++            } else {
++                baseline_pacing_rate_bytes_per_second
++            },
++            final_cwnd_bytes: input.baseline_cwnd_bytes,
++            control_applied,
++            soft_guard,
++            hard_guard,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn input(now: Instant) -> BabrLiteInput {
++        BabrLiteInput {
++            now,
++            phase: BabrBbrPhase::ProbeBwCruise,
++            end_of_round_trip: true,
++            baseline_pacing_rate_bytes_per_second: 20_000_000,
++            baseline_cwnd_bytes: 64_000,
++            model_delivery_rate_bytes_per_second: 20_000_000,
++            sample_valid: true,
++            sample_age_rounds: 0,
++            srtt: Duration::from_millis(50),
++            min_rtt: Duration::from_millis(50),
++            path_changed: false,
++            app_limited: false,
++            receiver_limited: false,
++            policy_limited: false,
++            loss_detected: false,
++            pto_fired: false,
++        }
++    }
++
++    fn controller(mode: BabrMode) -> BabrLiteController {
++        let mut c = BabrLiteController::default();
++        c.set_mode(mode);
++        c.set_target_bytes_per_second(26_000_000);
++        c
++    }
++
++    #[test]
++    fn off_and_observe_never_change_final_transport_output() {
++        let now = Instant::now();
++
++        for mode in [BabrMode::Off, BabrMode::Observe] {
++            let mut c = controller(mode);
++            let d = c.on_round(input(now));
++
++            assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
++            assert_eq!(d.final_cwnd_bytes, 64_000);
++            assert!(!d.control_applied);
++        }
++    }
++
++    #[test]
++    fn baseline_enters_only_below_frozen_80_percent_threshold() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.set_target_bytes_per_second(25_000_000);
++
++        let at_enter = c.on_round(input(now));
++        assert_eq!(at_enter.shadow_reason, BabrReasonCode::TargetNear);
++        assert_eq!(at_enter.state, BabrLiteState::Baseline);
++        assert_eq!(at_enter.weight_steps, 0);
++        assert!(!at_enter.control_applied);
++
++        let mut below = input(now + Duration::from_millis(1));
++        below.model_delivery_rate_bytes_per_second = 19_000_000;
++        let entered = c.on_round(below);
++        assert_eq!(entered.shadow_reason, BabrReasonCode::BoundedProbe);
++        assert_eq!(entered.state, BabrLiteState::Assist);
++        assert_eq!(entered.weight_steps, 1);
++    }
++
++    #[test]
++    fn assist_holds_in_hysteresis_band_and_exits_at_90_percent() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.set_target_bytes_per_second(25_000_000);
++
++        let mut first = input(now);
++        first.model_delivery_rate_bytes_per_second = 19_000_000;
++        assert_eq!(c.on_round(first).state, BabrLiteState::Assist);
++
++        let mut in_band = input(now + Duration::from_millis(20));
++        in_band.model_delivery_rate_bytes_per_second = 21_000_000;
++        in_band.end_of_round_trip = false;
++        let held = c.on_round(in_band);
++        assert_eq!(held.state, BabrLiteState::Assist);
++        assert_eq!(held.shadow_reason, BabrReasonCode::BoundedProbe);
++
++        let mut at_exit = input(now + Duration::from_millis(40));
++        at_exit.model_delivery_rate_bytes_per_second = 22_500_000;
++        let exited = c.on_round(at_exit);
++        assert_eq!(exited.state, BabrLiteState::Baseline);
++        assert_eq!(exited.shadow_reason, BabrReasonCode::TargetNear);
++        assert_eq!(exited.weight_steps, 0);
++        assert!(!exited.control_applied);
++    }
++
++    #[test]
++    fn stale_delivery_sample_is_rejected_after_one_round() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.sample_age_rounds = SAMPLE_MAX_AGE_ROUNDS + 1;
++
++        let d = c.on_round(s);
++        assert_eq!(d.shadow_reason, BabrReasonCode::SampleInvalid);
++        assert_eq!(d.state, BabrLiteState::Baseline);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn one_round_old_delivery_sample_remains_eligible() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.sample_age_rounds = SAMPLE_MAX_AGE_ROUNDS;
++
++        let d = c.on_round(s);
++        assert_eq!(d.shadow_reason, BabrReasonCode::BoundedProbe);
++        assert_eq!(d.state, BabrLiteState::Assist);
++    }
++
++    #[test]
++    fn invalid_target_update_preserves_previous_valid_configuration() {
++        let mut c = controller(BabrMode::Lite);
++        assert_eq!(c.target_bytes_per_second, 26_000_000);
++
++        assert!(!c.set_target_bytes_per_second(999_999));
++        assert_eq!(c.target_bytes_per_second, 26_000_000);
++
++        assert!(!c.set_target_bytes_per_second(125_000_001));
++        assert_eq!(c.target_bytes_per_second, 26_000_000);
++
++        assert!(c.set_target_bytes_per_second(0));
++        assert_eq!(c.target_bytes_per_second, 0);
++    }
++
++    #[test]
++    fn max_rate_caps_baseline_even_when_assist_is_policy_limited() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.set_max_rate_bytes_per_second(Some(18_000_000));
++
++        let d = c.on_round(input(now));
++        assert_eq!(d.shadow_reason, BabrReasonCode::PolicyLimited);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 18_000_000);
++        assert_eq!(d.final_cwnd_bytes, 64_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn zero_weight_publishes_baseline_pacing_not_reference_rate() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.end_of_round_trip = false;
++        s.baseline_pacing_rate_bytes_per_second = 21_000_000;
++
++        let d = c.on_round(s);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(d.candidate_pacing_rate_bytes_per_second, 20_000_000);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 21_000_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn lite_w_advances_once_per_packet_timed_round() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        let d1 = c.on_round(input(now));
++        assert_eq!(d1.weight_steps, 1);
++
++        let mut not_round = input(now + Duration::from_millis(10));
++        not_round.end_of_round_trip = false;
++        let d2 = c.on_round(not_round);
++        assert_eq!(d2.weight_steps, 1);
++
++        let mut second_round = input(now + Duration::from_millis(20));
++        // Keep this test focused on the packet-timed-round control clock:
++        // provide >=2% model gain so the frozen NO_BENEFIT rule does not
++        // intentionally terminate assist on the second complete round.
++        second_round.model_delivery_rate_bytes_per_second = 20_500_000;
++        let d3 = c.on_round(second_round);
++        assert_eq!(d3.weight_steps, 2);
++    }
++
++    #[test]
++    fn lite_no_benefit_clears_weight_after_two_complete_rounds() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        let d1 = c.on_round(input(now));
++        assert_eq!(d1.weight_steps, 1);
++
++        let d2 = c.on_round(input(now + Duration::from_millis(20)));
++        assert_eq!(d2.shadow_reason, BabrReasonCode::NoBenefit);
++        assert_eq!(d2.state, BabrLiteState::AssistBackoff);
++        assert_eq!(d2.weight_steps, 0);
++        assert!(!d2.control_applied);
++    }
++
++    #[test]
++    fn lite_candidate_is_capped_at_110_percent_reference() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.set_target_bytes_per_second(125_000_000);
++
++        let d = c.on_round(input(now));
++        assert!(d.control_applied);
++        assert!(d.candidate_pacing_rate_bytes_per_second <= 22_000_000);
++        assert_eq!(d.final_cwnd_bytes, 64_000);
++    }
++
++    #[test]
++    fn protected_bbr_phases_never_apply_control() {
++        let now = Instant::now();
++
++        for phase in [
++            BabrBbrPhase::Startup,
++            BabrBbrPhase::Drain,
++            BabrBbrPhase::ProbeBwDown,
++            BabrBbrPhase::ProbeRtt,
++        ] {
++            let mut c = controller(BabrMode::Lite);
++            let mut s = input(now);
++            s.phase = phase;
++            let d = c.on_round(s);
++
++            assert_eq!(d.shadow_reason, BabrReasonCode::BbrPhaseProtected);
++            assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
++            assert!(!d.control_applied);
++        }
++    }
++
++    #[test]
++    fn assist_timeout_is_monotonic_and_clears_w() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        let d1 = c.on_round(input(now));
++        assert_eq!(d1.weight_steps, 1);
++
++        let d2 = c.on_round(input(now + MAX_ASSIST_DURATION));
++        assert_eq!(d2.shadow_reason, BabrReasonCode::AssistTimeout);
++        assert_eq!(d2.state, BabrLiteState::AssistBackoff);
++        assert_eq!(d2.weight_steps, 0);
++        assert!(!d2.control_applied);
++    }
++
++    #[test]
++    fn hard_queue_delay_forces_baseline() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.srtt = Duration::from_millis(90);
++
++        let d = c.on_round(s);
++        assert_eq!(d.shadow_reason, BabrReasonCode::HardQueueDelay);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
++        assert!(d.hard_guard);
++        assert_eq!(d.final_pacing_rate_bytes_per_second, 20_000_000);
++        assert!(!d.control_applied);
++    }
++
++    #[test]
++    fn mode_change_clears_shadow_weight() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Observe);
++        assert_eq!(c.on_round(input(now)).weight_steps, 1);
++
++        c.set_mode(BabrMode::Off);
++        let d = c.on_round(input(now + Duration::from_millis(1)));
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(d.state, BabrLiteState::Baseline);
++    }
++
++    #[test]
++    fn loss_enters_backoff_and_blocks_reentry_until_deadline() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++
++        let failed = c.on_round(loss);
++        assert_eq!(failed.shadow_reason, BabrReasonCode::LossDetected);
++        assert_eq!(failed.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++        assert_eq!(
++            c.backoff_deadline,
++            Some(now + Duration::from_millis(BACKOFF_BASE_MS)),
++        );
++
++        let blocked = c.on_round(input(now + Duration::from_secs(29)));
++        assert_eq!(blocked.shadow_reason, BabrReasonCode::BackoffActive);
++        assert_eq!(blocked.state, BabrLiteState::AssistBackoff);
++        assert_eq!(blocked.weight_steps, 0);
++
++        let resumed = c.on_round(input(now + Duration::from_secs(30)));
++        assert_eq!(resumed.shadow_reason, BabrReasonCode::BoundedProbe);
++        assert_eq!(resumed.state, BabrLiteState::Assist);
++        assert_eq!(resumed.weight_steps, 1);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn mode_and_target_changes_do_not_clear_backoff_history() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++        c.on_round(loss);
++        let deadline = c.backoff_deadline;
++
++        c.set_mode(BabrMode::Off);
++        c.set_target_bytes_per_second(30_000_000);
++        assert_eq!(c.backoff_deadline, deadline);
++        assert_eq!(c.failure_count, 1);
++
++        c.set_mode(BabrMode::Lite);
++        let blocked = c.on_round(input(now + Duration::from_secs(1)));
++        assert_eq!(blocked.shadow_reason, BabrReasonCode::BackoffActive);
++        assert_eq!(blocked.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn repeated_failures_double_backoff_up_to_frozen_schedule() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut loss = input(now);
++        loss.loss_detected = true;
++        c.on_round(loss);
++
++        let restart = now + Duration::from_secs(30);
++        assert_eq!(c.on_round(input(restart)).state, BabrLiteState::Assist);
++
++        let second_failure_time = restart + Duration::from_secs(1);
++        let mut pto = input(second_failure_time);
++        pto.pto_fired = true;
++        let failed = c.on_round(pto);
++        assert_eq!(failed.shadow_reason, BabrReasonCode::PtoFired);
++        assert_eq!(c.failure_count, 2);
++        assert_eq!(
++            c.backoff_deadline,
++            Some(second_failure_time + Duration::from_secs(60)),
++        );
++    }
++
++    #[test]
++    fn third_complete_round_exits_with_max_rounds() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        assert_eq!(c.on_round(input(now)).weight_steps, 1);
++
++        let mut second = input(now + Duration::from_millis(20));
++        second.model_delivery_rate_bytes_per_second = 20_500_000;
++        assert_eq!(c.on_round(second).weight_steps, 2);
++
++        let mut third = input(now + Duration::from_millis(40));
++        third.model_delivery_rate_bytes_per_second = 20_500_000;
++        let d = c.on_round(third);
++        assert_eq!(d.shadow_reason, BabrReasonCode::MaxRounds);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
++        assert_eq!(d.weight_steps, 0);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn timeout_has_priority_over_target_near() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        let mut late = input(now + MAX_ASSIST_DURATION);
++        late.model_delivery_rate_bytes_per_second = 24_000_000;
++        let d = c.on_round(late);
++        assert_eq!(d.shadow_reason, BabrReasonCode::AssistTimeout);
++        assert_eq!(d.state, BabrLiteState::AssistBackoff);
++    }
++}

@@ -1,0 +1,384 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -106,9 +106,10 @@
+     max_rate_bytes_per_second: Option<u64>,
+     state: BabrLiteState,
+     weight_steps: u8,
+-    rounds: u8,
+-    reference_rate_bytes_per_second: Option<u64>,
+-    assist_deadline: Option<Instant>,
++    rounds: u8,
++    reference_rate_bytes_per_second: Option<u64>,
++    assist_target_bytes_per_second: Option<u64>,
++    assist_deadline: Option<Instant>,
+     assist_budget_bytes: u64,
+     assist_budget_debit_bytes: u64,
+     assist_unrevocable_queue_bytes: u64,
+@@ -124,9 +125,10 @@
+             max_rate_bytes_per_second: None,
+             state: BabrLiteState::Baseline,
+             weight_steps: 0,
+-            rounds: 0,
+-            reference_rate_bytes_per_second: None,
+-            assist_deadline: None,
++            rounds: 0,
++            reference_rate_bytes_per_second: None,
++            assist_target_bytes_per_second: None,
++            assist_deadline: None,
+             assist_budget_bytes: 0,
+             assist_budget_debit_bytes: 0,
+             assist_unrevocable_queue_bytes: 0,
+@@ -164,19 +166,25 @@
+         self.max_rate_bytes_per_second = max_rate;
+     }
+ 
+-    fn clear_assist_round(&mut self) {
+-        self.weight_steps = 0;
+-        self.rounds = 0;
+-        self.reference_rate_bytes_per_second = None;
+-        self.assist_deadline = None;
+-        self.assist_budget_bytes = 0;
+-        self.assist_budget_debit_bytes = 0;
+-    }
+-
+-    fn enter_baseline(&mut self) {
+-        self.state = BabrLiteState::Baseline;
+-        self.clear_assist_round();
+-    }
++    fn clear_assist_envelope(&mut self) {
++        self.weight_steps = 0;
++        self.rounds = 0;
++        self.reference_rate_bytes_per_second = None;
++        self.assist_target_bytes_per_second = None;
++        self.assist_deadline = None;
++        self.assist_budget_bytes = 0;
++        self.assist_budget_debit_bytes = 0;
++    }
++
++    fn enter_baseline(&mut self) {
++        self.state = BabrLiteState::Baseline;
++        self.weight_steps = 0;
++    }
++
++    fn cancel_assist_envelope(&mut self) {
++        self.state = BabrLiteState::Baseline;
++        self.clear_assist_envelope();
++    }
+ 
+     fn enter_backoff(&mut self, now: Instant) {
+         self.failure_count = self.failure_count.saturating_add(1);
+@@ -186,19 +194,19 @@
+             .saturating_mul(multiplier)
+             .min(BACKOFF_MAX_MS);
+ 
+-        self.state = BabrLiteState::AssistBackoff;
+-        self.clear_assist_round();
+-        self.backoff_deadline =
++        self.state = BabrLiteState::AssistBackoff;
++        self.clear_assist_envelope();
++        self.backoff_deadline =
+             Some(now + Duration::from_millis(backoff_ms));
+     }
+ 
+     fn backoff_active(&mut self, now: Instant) -> bool {
+         if let Some(deadline) = self.backoff_deadline {
+-            if now < deadline {
+-                self.state = BabrLiteState::AssistBackoff;
+-                self.clear_assist_round();
+-                return true;
+-            }
++            if now < deadline {
++                self.state = BabrLiteState::AssistBackoff;
++                self.clear_assist_envelope();
++                return true;
++            }
+ 
+             self.backoff_deadline = None;
+             if self.state == BabrLiteState::AssistBackoff {
+@@ -351,7 +359,14 @@
+         }
+     }
+ 
+-    fn target_reason(&self) -> Option<BabrReasonCode> {
++    fn effective_assist_target_bytes_per_second(&self) -> u64 {
++        self.assist_target_bytes_per_second
++            .map_or(self.target_bytes_per_second, |frozen_target| {
++                self.target_bytes_per_second.min(frozen_target)
++            })
++    }
++
++    fn target_reason(&self) -> Option<BabrReasonCode> {
+         if self.target_bytes_per_second == 0 {
+             return Some(BabrReasonCode::TargetDisabled);
+         }
+@@ -446,14 +461,17 @@
+         let (guard_reason, soft_guard, hard_guard) =
+             self.guard_reason(input);
+         if let Some(reason) = guard_reason {
+-            match reason {
+-                BabrReasonCode::LossDetected |
+-                BabrReasonCode::PtoFired |
+-                BabrReasonCode::HardQueueDelay => {
+-                    self.enter_backoff(input.now);
+-                },
+-                _ => self.enter_baseline(),
+-            }
++            match reason {
++                BabrReasonCode::LossDetected |
++                BabrReasonCode::PtoFired |
++                BabrReasonCode::HardQueueDelay => {
++                    self.enter_backoff(input.now);
++                },
++                BabrReasonCode::PathChanged => {
++                    self.cancel_assist_envelope();
++                },
++                _ => self.enter_baseline(),
++            }
+ 
+             return self.baseline_decision(
+                 input,
+@@ -474,14 +492,21 @@
+             );
+         }
+ 
+-        // Frozen target hysteresis: BASELINE may enter only below 0.8T.
+-        // Once ASSIST is active, the separate 0.9T exit threshold below
+-        // controls withdrawal so the 0.8T..0.9T band preserves state.
+-        if self.state != BabrLiteState::Assist {
+-            let enter_threshold = self
+-                .target_bytes_per_second
+-                .saturating_mul(TARGET_ENTER_NUMERATOR) /
+-                TARGET_ENTER_DENOMINATOR;
++        if self.state != BabrLiteState::Assist &&
++            self.assist_deadline.is_some_and(|deadline| input.now >= deadline)
++        {
++            self.clear_assist_envelope();
++        }
++
++        let control_target = self.effective_assist_target_bytes_per_second();
++
++        // Frozen target hysteresis: BASELINE may enter only below 0.8T.
++        // Once ASSIST is active, the separate 0.9T exit threshold below
++        // controls withdrawal so the 0.8T..0.9T band preserves state.
++        if self.state != BabrLiteState::Assist {
++            let enter_threshold = control_target
++                .saturating_mul(TARGET_ENTER_NUMERATOR) /
++                TARGET_ENTER_DENOMINATOR;
+             if input.model_delivery_rate_bytes_per_second >= enter_threshold {
+                 self.enter_baseline();
+                 return self.baseline_decision(
+@@ -494,21 +519,21 @@
+             }
+         }
+ 
+-        if self.state != BabrLiteState::Assist ||
+-            self.reference_rate_bytes_per_second.is_none()
+-        {
+-            self.state = BabrLiteState::Assist;
+-            self.reference_rate_bytes_per_second =
+-                Some(input.model_delivery_rate_bytes_per_second);
+-            self.assist_deadline = input.now.checked_add(MAX_ASSIST_DURATION);
+-            self.assist_budget_bytes = Self::frozen_assist_budget_bytes(
+-                input.model_delivery_rate_bytes_per_second,
+-                input.min_rtt,
+-            );
+-            self.assist_budget_debit_bytes = 0;
+-            self.rounds = 0;
+-            self.weight_steps = 0;
+-        }
++        if self.reference_rate_bytes_per_second.is_none() {
++            self.reference_rate_bytes_per_second =
++                Some(input.model_delivery_rate_bytes_per_second);
++            self.assist_target_bytes_per_second =
++                Some(self.target_bytes_per_second);
++            self.assist_deadline = input.now.checked_add(MAX_ASSIST_DURATION);
++            self.assist_budget_bytes = Self::frozen_assist_budget_bytes(
++                input.model_delivery_rate_bytes_per_second,
++                input.min_rtt,
++            );
++            self.assist_budget_debit_bytes = 0;
++            self.rounds = 0;
++            self.weight_steps = 0;
++        }
++        self.state = BabrLiteState::Assist;
+ 
+         let reference_rate = self.reference_rate_bytes_per_second.unwrap();
+         let deadline = self.assist_deadline.unwrap_or(input.now);
+@@ -527,10 +552,9 @@
+         // ACKs are not a control clock. Only a real BBR packet-timed round may
+         // consume a round budget or advance W.
+         if !input.end_of_round_trip {
+-            let target_near_threshold = self
+-                .target_bytes_per_second
+-                .saturating_mul(TARGET_EXIT_NUMERATOR) /
+-                TARGET_EXIT_DENOMINATOR;
++            let target_near_threshold = control_target
++                .saturating_mul(TARGET_EXIT_NUMERATOR) /
++                TARGET_EXIT_DENOMINATOR;
+             if input.model_delivery_rate_bytes_per_second >=
+                 target_near_threshold
+             {
+@@ -584,10 +608,9 @@
+             );
+         }
+ 
+-        let target_near_threshold = self
+-            .target_bytes_per_second
+-            .saturating_mul(TARGET_EXIT_NUMERATOR) /
+-            TARGET_EXIT_DENOMINATOR;
++        let target_near_threshold = control_target
++            .saturating_mul(TARGET_EXIT_NUMERATOR) /
++            TARGET_EXIT_DENOMINATOR;
+         if input.model_delivery_rate_bytes_per_second >=
+             target_near_threshold
+         {
+@@ -621,8 +644,8 @@
+         let relative_cap = reference_rate
+             .saturating_mul(MAX_RELATIVE_RATE_GAIN_NUMERATOR) /
+             MAX_RELATIVE_RATE_GAIN_DENOMINATOR;
+-        let mut pacing_cap =
+-            self.target_bytes_per_second.min(relative_cap);
++        let mut pacing_cap =
++            self.effective_assist_target_bytes_per_second().min(relative_cap);
+ 
+         if let Some(max_rate) = self.max_rate_bytes_per_second {
+             pacing_cap = pacing_cap.min(max_rate);
+@@ -1105,8 +1128,135 @@
+         assert_eq!(c.assist_unrevocable_queue_bytes, 0);
+     }
+ 
+-    #[test]
+-    fn hard_queue_delay_forces_baseline() {
++    #[test]
++    fn target_updates_do_not_refill_or_extend_running_assist() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let first = c.on_round(input(now));
++        assert!(first.control_applied);
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        c.resolve_unrevocable_queue();
++
++        let reference = c.reference_rate_bytes_per_second;
++        let frozen_target = c.assist_target_bytes_per_second;
++        let deadline = c.assist_deadline;
++        let budget = c.assist_budget_bytes;
++        let debit = c.assist_budget_debit_bytes;
++        let rounds = c.rounds;
++
++        assert!(c.set_target_bytes_per_second(40_000_000));
++        let mut non_round = input(now + Duration::from_millis(1));
++        non_round.end_of_round_trip = false;
++        let raised = c.on_round(non_round);
++        assert_eq!(
++            raised.candidate_pacing_rate_bytes_per_second,
++            first.candidate_pacing_rate_bytes_per_second,
++        );
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_target_bytes_per_second, frozen_target);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_bytes, budget);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++        assert_eq!(c.rounds, rounds);
++
++        assert!(c.set_target_bytes_per_second(21_000_000));
++        let lowered = c.on_round(non_round);
++        assert_eq!(lowered.shadow_reason, BabrReasonCode::TargetNear);
++        assert_eq!(lowered.state, BabrLiteState::Baseline);
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_bytes, budget);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++
++        assert!(c.set_target_bytes_per_second(26_000_000));
++        let resumed = c.on_round(non_round);
++        assert_eq!(resumed.state, BabrLiteState::Assist);
++        assert_eq!(resumed.weight_steps, 0);
++        assert!(!resumed.control_applied);
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_bytes, budget);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++        assert_eq!(c.rounds, rounds);
++    }
++
++    #[test]
++    fn mode_and_short_idle_preserve_frozen_envelope() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Assist,
++        );
++        c.resolve_unrevocable_queue();
++
++        let reference = c.reference_rate_bytes_per_second;
++        let deadline = c.assist_deadline;
++        let budget = c.assist_budget_bytes;
++        let debit = c.assist_budget_debit_bytes;
++        let rounds = c.rounds;
++
++        c.set_mode(BabrMode::Off);
++        assert_eq!(c.state, BabrLiteState::Baseline);
++        assert_eq!(c.weight_steps, 0);
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_bytes, budget);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++
++        c.set_mode(BabrMode::Lite);
++        let mut non_round = input(now + Duration::from_millis(1));
++        non_round.end_of_round_trip = false;
++        let resumed = c.on_round(non_round);
++        assert_eq!(resumed.state, BabrLiteState::Assist);
++        assert_eq!(resumed.weight_steps, 0);
++
++        let mut idle = non_round;
++        idle.app_limited = true;
++        let paused = c.on_round(idle);
++        assert_eq!(paused.shadow_reason, BabrReasonCode::AppLimited);
++        assert_eq!(paused.state, BabrLiteState::Baseline);
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_bytes, budget);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++        assert_eq!(c.rounds, rounds);
++
++        let resumed_again = c.on_round(non_round);
++        assert_eq!(resumed_again.state, BabrLiteState::Assist);
++        assert_eq!(c.reference_rate_bytes_per_second, reference);
++        assert_eq!(c.assist_deadline, deadline);
++        assert_eq!(c.assist_budget_debit_bytes, debit);
++    }
++
++    #[test]
++    fn confirmed_path_change_cancels_envelope_but_keeps_failure_history() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.failure_count = 2;
++        c.on_round(input(now));
++
++        let mut changed = input(now + Duration::from_millis(1));
++        changed.path_changed = true;
++        let d = c.on_round(changed);
++
++        assert_eq!(d.shadow_reason, BabrReasonCode::PathChanged);
++        assert_eq!(d.state, BabrLiteState::Baseline);
++        assert_eq!(c.failure_count, 2);
++        assert!(c.reference_rate_bytes_per_second.is_none());
++        assert!(c.assist_target_bytes_per_second.is_none());
++        assert!(c.assist_deadline.is_none());
++        assert_eq!(c.assist_budget_bytes, 0);
++        assert_eq!(c.assist_budget_debit_bytes, 0);
++    }
++
++    #[test]
++    fn hard_queue_delay_forces_baseline() {
+         let now = Instant::now();
+         let mut c = controller(BabrMode::Lite);
+         let mut s = input(now);

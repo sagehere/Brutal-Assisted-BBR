@@ -1,0 +1,28 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -440,10 +440,12 @@ pub(crate) struct BabrTransportGuardCounters {
+     pub(crate) last_path_id: Option<u64>,
+     pub(crate) receiver_limited_events: u64,
+     pub(crate) policy_limited_events: u64,
++    pub(crate) event_generation: u64,
+ }
+ 
+ impl BabrTransportGuardCounters {
+     fn record(&mut self, event: BabrTransportGuardEvent) {
++        self.event_generation = self.event_generation.saturating_add(1);
+         match event {
+             BabrTransportGuardEvent::LossDetected {
+                 lost_bytes,
+diff --git a/quiche/src/recovery/gcongestion/babr_telemetry.rs b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+--- a/quiche/src/recovery/gcongestion/babr_telemetry.rs
++++ b/quiche/src/recovery/gcongestion/babr_telemetry.rs
+@@ -155,7 +155,7 @@ impl BabrObserveTelemetry {
+     pub(crate) fn has_new_guard(
+         &self, guards: BabrTransportGuardCounters,
+     ) -> bool {
+-        self.guard_reason(guards).is_some()
++        guards.event_generation > self.last_guards.event_generation
+     }
+ 
+     pub(crate) fn set_enabled(

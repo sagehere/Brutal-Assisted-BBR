@@ -1,0 +1,79 @@
+name: P2 Lite Entry Smoke
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/netns/**"
+      - "tools/p2/preflight.sh"
+      - "tools/p2/apply-host-patches.sh"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-lite-entry-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  lite-entry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native and network dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             cmake clang pkg-config perl nasm             iproute2 iputils-ping iperf3 time
+
+      - name: Apply frozen-host P2 patches
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Build real tokio-quiche sender
+        run: |
+          cargo build             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p tokio-quiche             --example async_http3_server             --features gcongestion
+
+      - name: Build real quiche receiver
+        run: |
+          cargo build             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche_apps             --bin quiche-client
+
+      - name: Run policy-limited Lite entry smoke
+        env:
+          BABR_RATE_MBIT: "100"
+          BABR_ONE_WAY_DELAY_MS: "20"
+          BABR_LOSS_PCT: "0"
+          BABR_P2_FLOW_BYTES: "8388608"
+          BABR_P2_TARGET_BPS: "25000000"
+          BABR_P2_MAX_RATE_BPS: "2000000"
+          BABR_P2_LITE_ENTRY_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-lite-entry-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-lite-entry-smoke.sh
+
+      - name: Show Lite entry summary
+        if: always()
+        run: |
+          if [[ -f 阶段任务书/p2-lite-entry-artifacts/summary.json ]]; then
+            cat 阶段任务书/p2-lite-entry-artifacts/summary.json
+          fi
+
+      - name: Upload Lite entry evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-lite-entry-${{ github.sha }}
+          path: 阶段任务书/p2-lite-entry-artifacts
+          if-no-files-found: error

@@ -1,0 +1,216 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -430,5 +430,6 @@ pub struct GRecovery {
+     bytes_sent: usize,
+     babr_transport_acked_bytes: u64,
+     babr_guard_counters: BabrTransportGuardCounters,
++    babr_actual_socket_sent_bytes: u64,
+ 
+     pub bytes_lost: u64,
+@@ -471,6 +472,8 @@ impl GRecovery {
+             recovery_packet_bytes_sent: self.bytes_sent as u64,
+             transport_acked_bytes: self.babr_transport_acked_bytes,
+             transport_lost_bytes: self.babr_guard_counters.loss_bytes,
+             unique_payload_delivered_bytes: None,
+-            actual_socket_sent_bytes: None,
++            actual_socket_sent_bytes: Some(
++                self.babr_actual_socket_sent_bytes,
++            ),
+         };
+@@ -487,6 +494,14 @@ impl GRecovery {
+         }
+     }
+ 
++    /// Records bytes accepted by the socket/GSO send boundary.
++    /// Generation, queueing, WouldBlock, and failed sends do not call this.
++    pub(crate) fn babr_on_socket_sent(&mut self, bytes: usize) {
++        self.babr_actual_socket_sent_bytes = self
++            .babr_actual_socket_sent_bytes
++            .saturating_add(bytes as u64);
++    }
++
+     /// Path identity must come from the connection/path layer. Recovery does
+     /// not infer migration from RTT changes.
+     pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
+@@ -544,5 +558,6 @@ impl GRecovery {
+             bytes_sent: 0,
+             babr_transport_acked_bytes: 0,
+             babr_guard_counters: Default::default(),
++            babr_actual_socket_sent_bytes: 0,
+             bytes_lost: 0,
+ 
+@@ -1230,11 +1245,18 @@ mod tests {
+     #[test]
+     fn babr_observe_accounting_keeps_unavailable_metrics_unknown() {
+-        let r = new_babr_recovery();
++        let mut r = new_babr_recovery();
+         let snapshot = r.babr_observe_snapshot();
+ 
+         assert_eq!(snapshot.accounting.recovery_packet_bytes_sent, 0);
+         assert_eq!(snapshot.accounting.transport_acked_bytes, 0);
+         assert_eq!(snapshot.accounting.transport_lost_bytes, 0);
+         assert_eq!(snapshot.accounting.unique_payload_delivered_bytes, None);
+-        assert_eq!(snapshot.accounting.actual_socket_sent_bytes, None);
++        assert_eq!(snapshot.accounting.actual_socket_sent_bytes, Some(0));
++
++        r.babr_on_socket_sent(1200);
++        r.babr_on_socket_sent(300);
++        assert_eq!(
++            r.babr_observe_snapshot().accounting.actual_socket_sent_bytes,
++            Some(1500),
++        );
+     }
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -468,11 +468,23 @@ impl Recovery {
+     pub fn new_with_config(recovery_config: &RecoveryConfig) -> Self {
+         let grecovery = GRecovery::new(recovery_config);
+         if let Some(grecovery) = grecovery {
+             Recovery::from(grecovery)
+         } else {
+             Recovery::from(LegacyRecovery::new_with_config(recovery_config))
+         }
+     }
+ 
++    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_on_path_changed(path_id);
++        }
++    }
++
++    pub(crate) fn babr_on_socket_sent(&mut self, bytes: usize) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_on_socket_sent(bytes);
++        }
++    }
++
+     #[cfg(feature = "qlog")]
+     pub fn maybe_qlog(
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -7040,18 +7040,38 @@ impl<F: BufFactory> Connection<F> {
+     pub fn paths_iter(&self, from: SocketAddr) -> SocketAddrIter {
+         // Instead of trying to identify whether packets will be sent on the
+         // given 4-tuple, simply filter paths that cannot be used.
+         SocketAddrIter {
+             sockaddrs: self
+                 .paths
+                 .iter()
+                 .filter(|(_, p)| p.active_dcid_seq.is_some())
+                 .filter(|(_, p)| p.usable() || p.probing_required())
+                 .filter(|(_, p)| p.local_addr() == from)
+                 .map(|(_, p)| p.peer_addr())
+                 .collect(),
+ 
+             index: 0,
+         }
+     }
+ 
++    /// BABR Observe-only hook for the actual socket/GSO success boundary.
++    ///
++    /// `bytes` must be exactly the successful socket return value. This
++    /// method never changes pacing, CWND, send permission, or recovery.
++    #[doc(hidden)]
++    pub fn babr_on_socket_sent(
++        &mut self, from: SocketAddr, to: SocketAddr, bytes: usize,
++    ) -> Result<()> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_on_socket_sent(bytes);
++        Ok(())
++    }
++
+     /// Closes the connection with the given error and reason.
+@@ -17110,6 +17127,15 @@ impl<F: BufFactory> Connection<F> {
+                 self.lost_bytes += lost_bytes as u64;
+             }
+         }
+ 
+-        self.paths.set_active_path(path_id)
++        self.paths.set_active_path(path_id)?;
++
++        // The path manager is the source of truth for migration identity.
++        // Do not infer this event from RTT or recovery state.
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_on_path_changed(path_id as u64);
++
++        Ok(())
+     }
+diff --git a/tokio-quiche/src/quic/io/worker.rs b/tokio-quiche/src/quic/io/worker.rs
+--- a/tokio-quiche/src/quic/io/worker.rs
++++ b/tokio-quiche/src/quic/io/worker.rs
+@@ -260,7 +260,7 @@
+                     let mut flush_operation_token =
+                         TrackMidHandshakeFlush::new(self.metrics.clone());
+ 
+-                    self.flush_buffer_to_socket(ctx.buffer()).await;
++                    self.flush_buffer_to_socket(qconn, ctx.buffer()).await;
+ 
+                     flush_operation_token.mark_complete();
+ 
+@@ -330,7 +330,7 @@
+                 directive = self.wait_for_data_or_handshake(qconn, application) => {
+                     match directive? {
+                         WaitForDataOrHandshakeDirective::Flush => {
+-                            self.flush_buffer_to_socket(application.buffer()).await;
++                            self.flush_buffer_to_socket(qconn, application.buffer()).await;
+                         }
+                         WaitForDataOrHandshakeDirective::Noop => {}
+                     }
+@@ -630,8 +630,11 @@
+-    async fn flush_buffer_to_socket(&mut self, send_buf: &[u8]) {
++    async fn flush_buffer_to_socket(
++        &mut self, qconn: &mut QuicheConnection, send_buf: &[u8],
++    ) {
+         if self.write_state.bytes_written > 0 {
+             let current_send_buf = &send_buf[..self.write_state.bytes_written];
+ 
+-            let (from, to) = self.write_state.selected_path.unzip();
++            let selected_path = self.write_state.selected_path;
++            let (from, to) = selected_path.unzip();
+ 
+             let to = to.unwrap_or(self.cfg.peer_addr);
+             let from = from.filter(|_| self.cfg.with_pktinfo);
+@@ -660,13 +663,20 @@
+             #[cfg(feature = "perf-quic-listener-metrics")]
+             self.measure_complete_handshake_time();
+ 
+             match send_res {
+-                Ok(n) =>
+-                    if n < self.write_state.bytes_written {
++                Ok(n) => {
++                    if let Some((path_from, path_to)) = selected_path {
++                        // Observe counts exactly the successful socket/GSO
++                        // return value. Partial sends count only their n bytes.
++                        let _ = qconn.babr_on_socket_sent(path_from, path_to, n);
++                    }
++
++                    if n < self.write_state.bytes_written {
+                         self.metrics
+                             .write_errors(labels::QuicWriteError::Partial)
+                             .inc();
+-                    },
++                    }
++                },
+ 
+                 Err(_) => {
+                     self.metrics.write_errors(labels::QuicWriteError::Err).inc();
+@@ -978,6 +988,6 @@
+         // guarantee that it gets sent by doublechecking the
+         // gathered/flushed byte totals and retry if they don't match.
+         let _ = self.gather_data_from_quiche_conn(qconn, ctx.buffer());
+-        self.flush_buffer_to_socket(ctx.buffer()).await;
++        self.flush_buffer_to_socket(qconn, ctx.buffer()).await;
+ 
+         *ctx.stats.lock().unwrap() = QuicConnectionStats::from_conn(qconn);

@@ -1,0 +1,114 @@
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -364,18 +364,25 @@
+         }
+     }
+ 
+-    #[inline]
+-    pub(crate) fn babr_lite_admit_generated_datagram(
+-        &mut self, now: Instant, wire_bytes: usize,
+-    ) -> bool {
+-        match self {
+-            Recovery::GCongestion(recovery) =>
+-                recovery.babr_lite_admit_generated_datagram(now, wire_bytes),
+-            Recovery::Legacy(_) => false,
+-        }
+-    }
+-
+-    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
++    #[inline]
++    pub(crate) fn babr_lite_admit_generated_datagram(
++        &mut self, now: Instant, wire_bytes: usize,
++    ) -> bool {
++        match self {
++            Recovery::GCongestion(recovery) =>
++                recovery.babr_lite_admit_generated_datagram(now, wire_bytes),
++            Recovery::Legacy(_) => false,
++        }
++    }
++
++    #[inline]
++    pub(crate) fn babr_lite_resolve_unrevocable_queue(&mut self) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_lite_resolve_unrevocable_queue();
++        }
++    }
++
++    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
+         if let Recovery::GCongestion(recovery) = self {
+             recovery.babr_on_path_changed(path_id);
+         }
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -7572,14 +7572,34 @@
+             .path_id_from_addrs(&(from, to))
+             .ok_or(Error::InvalidState)?;
+ 
+-        self.paths
+-            .get_mut(path_id)?
+-            .recovery
+-            .babr_on_socket_sent(bytes);
+-        Ok(())
+-    }
+-
+-    /// Enable or disable BABR Observe telemetry for one real path.
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_on_socket_sent(bytes);
++        Ok(())
++    }
++
++    /// Resolves one BABR Lite userspace socket/GSO batch.
++    ///
++    /// This releases only unrevocable queue occupancy. It does not refund
++    /// already-generated Assist execution-budget debit.
++    #[doc(hidden)]
++    pub fn babr_on_socket_flush_complete(
++        &mut self, from: SocketAddr, to: SocketAddr,
++    ) -> Result<()> {
++        let path_id = self
++            .paths
++            .path_id_from_addrs(&(from, to))
++            .ok_or(Error::InvalidState)?;
++
++        self.paths
++            .get_mut(path_id)?
++            .recovery
++            .babr_lite_resolve_unrevocable_queue();
++        Ok(())
++    }
++
++    /// Enable or disable BABR Observe telemetry for one real path.
+     #[doc(hidden)]
+     pub fn babr_set_observe_telemetry_enabled(
+         &mut self, from: SocketAddr, to: SocketAddr, enabled: bool,
+diff --git a/tokio-quiche/src/quic/io/worker.rs b/tokio-quiche/src/quic/io/worker.rs
+--- a/tokio-quiche/src/quic/io/worker.rs
++++ b/tokio-quiche/src/quic/io/worker.rs
+@@ -677,12 +677,17 @@
+                     }
+                 },
+ 
+-                Err(_) => {
+-                    self.metrics.write_errors(labels::QuicWriteError::Err).inc();
+-                },
+-            }
+-        }
+-    }
++                Err(_) => {
++                    self.metrics.write_errors(labels::QuicWriteError::Err).inc();
++                },
++            }
++
++            if let Some((path_from, path_to)) = selected_path {
++                let _ =
++                    qconn.babr_on_socket_flush_complete(path_from, path_to);
++            }
++        }
++    }
+ 
+     /// Process the incoming packet
+     fn process_incoming(

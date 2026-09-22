@@ -1,0 +1,127 @@
+diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/driver/mod.rs
+--- a/tokio-quiche/src/http3/driver/mod.rs
++++ b/tokio-quiche/src/http3/driver/mod.rs
+@@ -371,5 +371,10 @@
+     babr_observe_sink: Option<File>,
+     babr_observe_path: Option<(SocketAddr, SocketAddr)>,
+     /// Throttle experiment-side serialization/write work off the H3 hot loop.
+     babr_observe_next_drain: Option<Instant>,
++
++    /// P2 Lite-only telemetry sink. Absent unless explicitly requested.
++    babr_lite_sink: Option<File>,
++    babr_lite_path: Option<(SocketAddr, SocketAddr)>,
++    babr_lite_next_drain: Option<Instant>,
+ }
+@@ -420,4 +420,7 @@
+                 babr_observe_sink: None,
+                 babr_observe_path: None,
+                 babr_observe_next_drain: None,
++                babr_lite_sink: None,
++                babr_lite_path: None,
++                babr_lite_next_drain: None,
+             },
+@@ -1173,4 +1173,72 @@
+         Ok(())
+     }
+ 
++    fn babr_lite_enable_from_env(
++        &mut self, qconn: &mut QuicheConnection,
++    ) -> QuicResult<()> {
++        let Some(path) = std::env::var_os("BABR_P2_LITE_TELEMETRY_FILE") else {
++            return Ok(());
++        };
++
++        let Some((from, to)) = qconn
++            .path_stats()
++            .find(|stats| stats.active)
++            .map(|stats| (stats.local_addr, stats.peer_addr))
++        else {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::NotFound,
++                "BABR Lite telemetry requested but no active QUIC path exists",
++            )
++            .into());
++        };
++
++        let sink = OpenOptions::new()
++            .create(true)
++            .write(true)
++            .truncate(true)
++            .open(path)?;
++
++        qconn.babr_set_lite_telemetry_enabled(from, to, true)?;
++        self.babr_lite_sink = Some(sink);
++        self.babr_lite_path = Some((from, to));
++        self.babr_lite_next_drain =
++            Some(Instant::now() + BABR_OBSERVE_DRAIN_INTERVAL);
++        Ok(())
++    }
++
++    fn babr_lite_drain(
++        &mut self, qconn: &mut QuicheConnection, force: bool,
++    ) -> QuicResult<()> {
++        let Some((from, to)) = self.babr_lite_path else {
++            return Ok(());
++        };
++
++        let now = Instant::now();
++        if !force {
++            if let Some(next) = self.babr_lite_next_drain {
++                if now < next {
++                    return Ok(());
++                }
++            }
++            self.babr_lite_next_drain =
++                Some(now + BABR_OBSERVE_DRAIN_INTERVAL);
++        }
++
++        let lines = qconn.babr_take_lite_telemetry_json_lines(from, to)?;
++        if lines.is_empty() {
++            return Ok(());
++        }
++
++        let Some(sink) = self.babr_lite_sink.as_mut() else {
++            return Ok(());
++        };
++        let mut batch = String::new();
++        for line in lines {
++            batch.push_str(&line);
++            batch.push('\n');
++        }
++        sink.write_all(batch.as_bytes())?;
++        Ok(())
++    }
++
+     fn babr_observe_enable_from_env(
+@@ -1388,7 +1388,8 @@
+         self.conn = Some(conn);
+ 
+         self.babr_experiment_configure_from_env(quiche_conn)?;
++        self.babr_lite_enable_from_env(quiche_conn)?;
+         H::conn_established(self, quiche_conn, handshake_info)?;
+         self.babr_observe_enable_from_env(quiche_conn)?;
+         Ok(())
+     }
+@@ -1424,6 +1424,7 @@
+         }
+ 
+         self.process_available_dgrams(qconn)?;
+         self.babr_observe_drain(qconn, false)?;
++        self.babr_lite_drain(qconn, false)?;
+         Ok(())
+     }
+@@ -1443,8 +1443,14 @@
+         if let Err(err) = self.babr_observe_drain(quiche_conn, true) {
+             log::error!(
+                 "BABR Observe telemetry final drain failed";
+                 "error" => %err
+             );
+         }
++        if let Err(err) = self.babr_lite_drain(quiche_conn, true) {
++            log::error!(
++                "BABR Lite telemetry final drain failed";
++                "error" => %err
++            );
++        }
+ 
+         let max_stream_seen = self.max_stream_seen;

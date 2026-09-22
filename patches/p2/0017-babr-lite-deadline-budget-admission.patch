@@ -1,0 +1,608 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -45,14 +45,21 @@
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub(crate) enum BabrLiteState {
+-    Baseline,
+-    Assist,
+-    AssistBackoff,
+-}
+-
+-#[derive(Debug, Clone, Copy)]
+-pub(crate) struct BabrLiteInput {
++pub(crate) enum BabrLiteState {
++    Baseline,
++    Assist,
++    AssistBackoff,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum BabrLiteAdmission {
++    Baseline,
++    Assist,
++    Withdraw(BabrReasonCode),
++}
++
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct BabrLiteInput {
+     pub(crate) now: Instant,
+     pub(crate) phase: BabrBbrPhase,
+     pub(crate) end_of_round_trip: bool,
+@@ -99,10 +106,12 @@
+     state: BabrLiteState,
+     weight_steps: u8,
+     rounds: u8,
+-    reference_rate_bytes_per_second: Option<u64>,
+-    assist_deadline: Option<Instant>,
+-    failure_count: u32,
+-    backoff_deadline: Option<Instant>,
++    reference_rate_bytes_per_second: Option<u64>,
++    assist_deadline: Option<Instant>,
++    assist_budget_bytes: u64,
++    assist_budget_debit_bytes: u64,
++    failure_count: u32,
++    backoff_deadline: Option<Instant>,
+ }
+ 
+ impl Default for BabrLiteController {
+@@ -114,10 +123,12 @@
+             state: BabrLiteState::Baseline,
+             weight_steps: 0,
+             rounds: 0,
+-            reference_rate_bytes_per_second: None,
+-            assist_deadline: None,
+-            failure_count: 0,
+-            backoff_deadline: None,
++            reference_rate_bytes_per_second: None,
++            assist_deadline: None,
++            assist_budget_bytes: 0,
++            assist_budget_debit_bytes: 0,
++            failure_count: 0,
++            backoff_deadline: None,
+         }
+     }
+ }
+@@ -150,14 +161,16 @@
+         self.max_rate_bytes_per_second = max_rate;
+     }
+ 
+-    fn clear_assist_round(&mut self) {
+-        self.weight_steps = 0;
+-        self.rounds = 0;
+-        self.reference_rate_bytes_per_second = None;
+-        self.assist_deadline = None;
+-    }
+-
+-    fn enter_baseline(&mut self) {
++    fn clear_assist_round(&mut self) {
++        self.weight_steps = 0;
++        self.rounds = 0;
++        self.reference_rate_bytes_per_second = None;
++        self.assist_deadline = None;
++        self.assist_budget_bytes = 0;
++        self.assist_budget_debit_bytes = 0;
++    }
++
++    fn enter_baseline(&mut self) {
+         self.state = BabrLiteState::Baseline;
+         self.clear_assist_round();
+     }
+@@ -190,11 +203,98 @@
+             }
+         }
+ 
+-        false
+-    }
+-
+-    fn baseline_decision(
+-        &self, input: BabrLiteInput, reason: BabrReasonCode,
++        false
++    }
++
++    fn frozen_assist_budget_bytes(
++        reference_rate_bytes_per_second: u64, min_rtt: Duration,
++    ) -> u64 {
++        let budget_duration = min_rtt
++            .checked_mul(MAX_ASSIST_ROUNDS as u32)
++            .unwrap_or(MAX_ASSIST_DURATION)
++            .min(MAX_ASSIST_DURATION);
++        let bytes = (reference_rate_bytes_per_second as u128)
++            .saturating_mul(budget_duration.as_nanos()) /
++            Duration::from_secs(1).as_nanos();
++
++        bytes.min(u64::MAX as u128) as u64
++    }
++
++    pub(crate) fn lite_deadline(&self) -> Option<Instant> {
++        (self.mode == BabrMode::Lite && self.state == BabrLiteState::Assist)
++            .then_some(self.assist_deadline)
++            .flatten()
++    }
++
++    pub(crate) fn on_deadline_timer(
++        &mut self, now: Instant,
++    ) -> Option<BabrReasonCode> {
++        if self
++            .lite_deadline()
++            .is_some_and(|deadline| now >= deadline)
++        {
++            self.enter_backoff(now);
++            return Some(BabrReasonCode::AssistTimeout);
++        }
++
++        None
++    }
++
++    pub(crate) fn on_send_entry(
++        &mut self, now: Instant,
++    ) -> Option<BabrReasonCode> {
++        if let Some(reason) = self.on_deadline_timer(now) {
++            return Some(reason);
++        }
++
++        if self.mode == BabrMode::Lite &&
++            self.state == BabrLiteState::Assist &&
++            self.weight_steps > 0 &&
++            self.assist_budget_debit_bytes >= self.assist_budget_bytes
++        {
++            self.enter_backoff(now);
++            return Some(BabrReasonCode::AssistBudgetExhausted);
++        }
++
++        None
++    }
++
++    pub(crate) fn admit_generated_datagram(
++        &mut self, now: Instant, wire_bytes: usize,
++    ) -> BabrLiteAdmission {
++        if self.mode != BabrMode::Lite ||
++            self.state != BabrLiteState::Assist ||
++            self.weight_steps == 0
++        {
++            return BabrLiteAdmission::Baseline;
++        }
++
++        if self
++            .assist_deadline
++            .is_some_and(|deadline| now >= deadline)
++        {
++            self.enter_backoff(now);
++            return BabrLiteAdmission::Withdraw(BabrReasonCode::AssistTimeout);
++        }
++
++        let charge = wire_bytes as u64;
++        let remaining = self
++            .assist_budget_bytes
++            .saturating_sub(self.assist_budget_debit_bytes);
++        if charge > remaining {
++            self.enter_backoff(now);
++            return BabrLiteAdmission::Withdraw(
++                BabrReasonCode::AssistBudgetExhausted,
++            );
++        }
++
++        self.assist_budget_debit_bytes =
++            self.assist_budget_debit_bytes.saturating_add(charge);
++        BabrLiteAdmission::Assist
++    }
++
++    fn baseline_decision(
++        &self, input: BabrLiteInput, reason: BabrReasonCode,
+         shadow_reason: BabrReasonCode, soft_guard: bool, hard_guard: bool,
+     ) -> BabrLiteDecision {
+         let baseline_pacing_rate_bytes_per_second =
+@@ -376,11 +476,16 @@
+             self.reference_rate_bytes_per_second.is_none()
+         {
+             self.state = BabrLiteState::Assist;
+-            self.reference_rate_bytes_per_second =
+-                Some(input.model_delivery_rate_bytes_per_second);
+-            self.assist_deadline = input.now.checked_add(MAX_ASSIST_DURATION);
+-            self.rounds = 0;
+-            self.weight_steps = 0;
++            self.reference_rate_bytes_per_second =
++                Some(input.model_delivery_rate_bytes_per_second);
++            self.assist_deadline = input.now.checked_add(MAX_ASSIST_DURATION);
++            self.assist_budget_bytes = Self::frozen_assist_budget_bytes(
++                input.model_delivery_rate_bytes_per_second,
++                input.min_rtt,
++            );
++            self.assist_budget_debit_bytes = 0;
++            self.rounds = 0;
++            self.weight_steps = 0;
+         }
+ 
+         let reference_rate = self.reference_rate_bytes_per_second.unwrap();
+@@ -784,8 +889,123 @@
+         assert!(!d2.control_applied);
+     }
+ 
+-    #[test]
+-    fn hard_queue_delay_forces_baseline() {
++    #[test]
++    fn assist_budget_is_frozen_from_reference_and_min_rtt() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++
++        let d = c.on_round(input(now));
++        assert!(d.control_applied);
++        assert_eq!(c.assist_budget_bytes, 3_000_000);
++        assert_eq!(c.assist_budget_debit_bytes, 0);
++    }
++
++    #[test]
++    fn send_entry_predebits_exact_generated_datagram_bytes() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_237),
++            BabrLiteAdmission::Assist,
++        );
++        assert_eq!(c.assist_budget_debit_bytes, 1_237);
++    }
++
++    #[test]
++    fn budget_exhaustion_withdraws_before_another_assist_datagram() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.srtt = Duration::from_millis(1);
++        s.min_rtt = Duration::from_millis(1);
++        c.on_round(s);
++
++        assert_eq!(c.assist_budget_bytes, 60_000);
++        for _ in 0..50 {
++            assert_eq!(
++                c.admit_generated_datagram(now, 1_200),
++                BabrLiteAdmission::Assist,
++            );
++        }
++
++        assert_eq!(
++            c.on_send_entry(now),
++            Some(BabrReasonCode::AssistBudgetExhausted),
++        );
++        assert_eq!(c.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn exact_remaining_budget_rejects_a_larger_next_datagram() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        let mut s = input(now);
++        s.srtt = Duration::from_millis(1);
++        s.min_rtt = Duration::from_millis(1);
++        c.on_round(s);
++
++        assert_eq!(
++            c.admit_generated_datagram(now, 59_000),
++            BabrLiteAdmission::Assist,
++        );
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_001),
++            BabrLiteAdmission::Withdraw(
++                BabrReasonCode::AssistBudgetExhausted,
++            ),
++        );
++        assert_eq!(c.state, BabrLiteState::AssistBackoff);
++    }
++
++    #[test]
++    fn deadline_has_zero_grace_at_send_entry() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        assert_eq!(
++            c.on_send_entry(now + MAX_ASSIST_DURATION),
++            Some(BabrReasonCode::AssistTimeout),
++        );
++        assert_eq!(c.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.failure_count, 1);
++    }
++
++    #[test]
++    fn deadline_timer_expires_without_an_ack_or_round_callback() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        c.on_round(input(now));
++
++        assert_eq!(c.lite_deadline(), Some(now + MAX_ASSIST_DURATION));
++        assert_eq!(
++            c.on_deadline_timer(now + MAX_ASSIST_DURATION),
++            Some(BabrReasonCode::AssistTimeout),
++        );
++        assert_eq!(c.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.lite_deadline(), None);
++    }
++
++    #[test]
++    fn observe_shadow_assist_never_arms_execution_deadline_or_budget() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Observe);
++        c.on_round(input(now));
++
++        assert_eq!(c.lite_deadline(), None);
++        assert_eq!(c.on_send_entry(now), None);
++        assert_eq!(
++            c.admit_generated_datagram(now, 1_200),
++            BabrLiteAdmission::Baseline,
++        );
++        assert_eq!(c.assist_budget_debit_bytes, 0);
++    }
++
++    #[test]
++    fn hard_queue_delay_forces_baseline() {
+         let now = Instant::now();
+         let mut c = controller(BabrMode::Lite);
+         let mut s = input(now);
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -43,8 +43,9 @@
+ 
+ use super::bbr2::BabrObserveSnapshot;
+ use super::bbr2::BBRv2;
+-use super::babr_lite::BabrLiteController;
+-use super::babr_lite::BabrLiteDecision;
++use super::babr_lite::BabrLiteAdmission;
++use super::babr_lite::BabrLiteController;
++use super::babr_lite::BabrLiteDecision;
+ use super::babr_lite::BabrLiteInput;
+ use super::babr_lite::BabrMode;
+ use super::babr_telemetry::BabrObserveTelemetry;
+@@ -724,16 +725,58 @@
+ 
+         // Consume each transport guard generation at most once so one event
+         // cannot be replayed by later ACK callbacks.
+-        self.babr_lite_last_guards = guards;
+-        self.babr_lite_controller.on_round(input)
+-    }
+-
+-    fn babr_lite_publish_pacing_decision(
+-        &mut self, decision: BabrLiteDecision,
+-    ) {
+-        self.babr_lite_pacing_rate_bytes_per_second =
+-            (self.babr_lite_controller.mode() == BabrMode::Lite)
+-                .then_some(decision.output_pacing_rate_bytes_per_second());
+-    }
++        self.babr_lite_last_guards = guards;
++        self.babr_lite_controller.on_round(input)
++    }
++
++    pub(crate) fn babr_lite_deadline(&self) -> Option<Instant> {
++        self.babr_lite_controller.lite_deadline()
++    }
++
++    pub(crate) fn babr_lite_assist_active(&self) -> bool {
++        self.babr_lite_pacing_rate_bytes_per_second.is_some()
++    }
++
++    pub(crate) fn babr_lite_on_deadline_timer(&mut self, now: Instant) {
++        if self
++            .babr_lite_controller
++            .on_deadline_timer(now)
++            .is_some()
++        {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++        }
++    }
++
++    pub(crate) fn babr_lite_on_send_entry(&mut self, now: Instant) {
++        if self.babr_lite_controller.on_send_entry(now).is_some() {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++        }
++    }
++
++    pub(crate) fn babr_lite_admit_generated_datagram(
++        &mut self, now: Instant, wire_bytes: usize,
++    ) -> bool {
++        match self
++            .babr_lite_controller
++            .admit_generated_datagram(now, wire_bytes)
++        {
++            BabrLiteAdmission::Assist => true,
++
++            BabrLiteAdmission::Baseline |
++            BabrLiteAdmission::Withdraw(_) => {
++                self.babr_lite_pacing_rate_bytes_per_second = None;
++                false
++            },
++        }
++    }
++
++    fn babr_lite_publish_pacing_decision(
++        &mut self, decision: BabrLiteDecision,
++    ) {
++        self.babr_lite_pacing_rate_bytes_per_second =
++            (self.babr_lite_controller.mode() == BabrMode::Lite &&
++                decision.control_applied)
++                .then_some(decision.output_pacing_rate_bytes_per_second());
++    }
+ 
+     fn babr_lite_refresh_pacing(&mut self, now: Instant) {
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -333,13 +333,55 @@
+         }
+     }
+ 
+-    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
+-        if let Recovery::GCongestion(recovery) = self {
+-            recovery.babr_on_path_changed(path_id);
+-        }
+-    }
+-
+-    pub(crate) fn babr_on_socket_sent(&mut self, bytes: usize) {
++    #[inline]
++    pub(crate) fn babr_lite_deadline(&self) -> Option<Instant> {
++        match self {
++            Recovery::GCongestion(recovery) => recovery.babr_lite_deadline(),
++            Recovery::Legacy(_) => None,
++        }
++    }
++
++    #[inline]
++    pub(crate) fn babr_lite_assist_active(&self) -> bool {
++        match self {
++            Recovery::GCongestion(recovery) =>
++                recovery.babr_lite_assist_active(),
++            Recovery::Legacy(_) => false,
++        }
++    }
++
++    #[inline]
++    pub(crate) fn babr_lite_on_deadline_timer(&mut self, now: Instant) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_lite_on_deadline_timer(now);
++        }
++    }
++
++    #[inline]
++    pub(crate) fn babr_lite_on_send_entry(&mut self, now: Instant) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_lite_on_send_entry(now);
++        }
++    }
++
++    #[inline]
++    pub(crate) fn babr_lite_admit_generated_datagram(
++        &mut self, now: Instant, wire_bytes: usize,
++    ) -> bool {
++        match self {
++            Recovery::GCongestion(recovery) =>
++                recovery.babr_lite_admit_generated_datagram(now, wire_bytes),
++            Recovery::Legacy(_) => false,
++        }
++    }
++
++    pub(crate) fn babr_on_path_changed(&mut self, path_id: u64) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_on_path_changed(path_id);
++        }
++    }
++
++    pub(crate) fn babr_on_socket_sent(&mut self, bytes: usize) {
+         if let Recovery::GCongestion(recovery) = self {
+             recovery.babr_on_socket_sent(bytes);
+         }
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -4135,11 +4135,16 @@
+             return Err(Error::BufferTooShort);
+         }
+ 
+-        if self.is_draining() {
+-            return Err(Error::Done);
+-        }
+-
+-        let is_closing = self.local_error.is_some();
++        if self.is_draining() {
++            return Err(Error::Done);
++        }
++
++        self.paths
++            .get_mut(send_pid)?
++            .recovery
++            .babr_lite_on_send_entry(now);
++
++        let is_closing = self.local_error.is_some();
+ 
+         let out_len = out.len();
+ 
+@@ -5463,13 +5468,22 @@
+             aead,
+         )?;
+ 
+-        let sent_pkt_has_data = if path.recovery.gcongestion_enabled() {
+-            has_data || dgram_emitted
+-        } else {
+-            has_data
+-        };
+-
+-        let sent_pkt = recovery::Sent {
++        let sent_pkt_has_data = if path.recovery.gcongestion_enabled() {
++            has_data || dgram_emitted
++        } else {
++            has_data
++        };
++
++        if in_flight &&
++            sent_pkt_has_data &&
++            path.recovery.babr_lite_assist_active()
++        {
++            let _ = path
++                .recovery
++                .babr_lite_admit_generated_datagram(now, written);
++        }
++
++        let sent_pkt = recovery::Sent {
+             pkt_num: pn,
+             frames,
+             time_sent: now,
+@@ -7038,14 +7052,25 @@
+                 .filter_map(|(_, p)| p.recovery.loss_detection_timer())
+                 .min();
+ 
+-            let key_update_timer = self.crypto_ctx[packet::Epoch::Application]
+-                .key_update
+-                .as_ref()
+-                .map(|key_update| key_update.timer);
+-
+-            let timers = [self.idle_timer, path_timer, key_update_timer];
+-
+-            timers.iter().filter_map(|&x| x).min()
++            let key_update_timer = self.crypto_ctx[packet::Epoch::Application]
++                .key_update
++                .as_ref()
++                .map(|key_update| key_update.timer);
++
++            let babr_lite_timer = self
++                .paths
++                .iter()
++                .filter_map(|(_, p)| p.recovery.babr_lite_deadline())
++                .min();
++
++            let timers = [
++                self.idle_timer,
++                path_timer,
++                key_update_timer,
++                babr_lite_timer,
++            ];
++
++            timers.iter().filter_map(|&x| x).min()
+         }
+     }
+ 
+@@ -7133,11 +7158,18 @@
+                         p.recovery.maybe_qlog(q, now);
+                     });
+                 }
+-            }
+-        }
+-
+-        // Notify timeout events to the application.
+-        self.paths.notify_failed_validations();
++            }
++        }
++
++        // Loss/PTO gets first refusal when it expires at the same Instant as
++        // the Lite deadline, so one physical failure cannot double-increment
++        // the backoff history.
++        for (_, p) in self.paths.iter_mut() {
++            p.recovery.babr_lite_on_deadline_timer(now);
++        }
++
++        // Notify timeout events to the application.
++        self.paths.notify_failed_validations();
+ 
+         // If the active path failed, try to find a new candidate.
+         if self.paths.get_active_path_id().is_err() {

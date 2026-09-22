@@ -1,0 +1,129 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -1361,4 +1361,125 @@ mod tests {
+     }
+ 
++    fn babr_noimpact_test_packet(
++        pkt_num: u64, now: Instant, size: usize,
++    ) -> Sent {
++        Sent {
++            pkt_num,
++            frames: SmallVec::new(),
++            time_sent: now,
++            time_acked: None,
++            time_lost: None,
++            size,
++            ack_eliciting: true,
++            in_flight: true,
++            delivered: 0,
++            delivered_time: now,
++            first_sent_time: now,
++            is_app_limited: false,
++            tx_in_flight: 0,
++            lost: 0,
++            has_data: true,
++            is_pmtud_probe: false,
++        }
++    }
++
++    fn assert_babr_transport_outputs_equal(
++        off: &GRecovery, observe: &GRecovery, next_datagram_bytes: usize,
++    ) {
++        // These are the host outputs that may gate or schedule transmission.
++        assert_eq!(off.pacing_rate(), observe.pacing_rate());
++        assert_eq!(off.cwnd(), observe.cwnd());
++        assert_eq!(off.cwnd_available(), observe.cwnd_available());
++        assert_eq!(
++            off.cwnd_available() >= next_datagram_bytes,
++            observe.cwnd_available() >= next_datagram_bytes,
++        );
++        assert_eq!(
++            off.get_next_release_time(),
++            observe.get_next_release_time()
++        );
++        assert_eq!(off.send_quantum(), observe.send_quantum());
++    }
++
++    #[test]
++    fn babr_off_observe_host_outputs_identical_with_telemetry_toggle() {
++        const DATAGRAM: usize = 1200;
++
++        let mut off = new_babr_recovery();
++        let mut observe = new_babr_recovery();
++        observe.babr_set_observe_telemetry_enabled(true);
++
++        let handshake_status = HandshakeStatus {
++            completed: true,
++            has_handshake_keys: true,
++            peer_verified_address: true,
++        };
++        let base = Instant::now();
++
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++
++        // Drive both real GRecovery/BBRv2 instances through the exact same
++        // packet sends. This crosses the actual Pacer and BBRv2 host path.
++        for pkt_num in 1..=12 {
++            let now = base + Duration::from_millis(pkt_num);
++            let off_pkt = babr_noimpact_test_packet(pkt_num, now, DATAGRAM);
++            let observe_pkt =
++                babr_noimpact_test_packet(pkt_num, now, DATAGRAM);
++
++            off.on_packet_sent(
++                off_pkt, packet::Epoch::Application, handshake_status, now,
++                "babr-off",
++            );
++            observe.on_packet_sent(
++                observe_pkt, packet::Epoch::Application, handshake_status, now,
++                "babr-observe",
++            );
++
++            assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++        }
++
++        // Feed the same ACK event to both instances so BBRv2 updates its real
++        // network model and pacing/CWND state on both sides.
++        let mut acked = RangeSet::default();
++        acked.insert(1..7);
++        let ack_now = base + Duration::from_millis(80);
++
++        let off_ack = off
++            .on_ack_received(
++                &acked, 0, packet::Epoch::Application, handshake_status,
++                ack_now, None, "babr-off",
++            )
++            .unwrap();
++        let observe_ack = observe
++            .on_ack_received(
++                &acked, 0, packet::Epoch::Application, handshake_status,
++                ack_now, None, "babr-observe",
++            )
++            .unwrap();
++        assert_eq!(off_ack, observe_ack);
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++
++        // Same external policy event on both hosts. Observe records it, Off
++        // does not, but transport output must remain exactly identical.
++        off.babr_on_policy_limited();
++        observe.babr_on_policy_limited();
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++        assert_eq!(off.babr_observe_telemetry_stats().records, 0);
++        assert!(observe.babr_observe_telemetry_stats().records > 0);
++
++        // Draining telemetry and toggling it off/on must remain transport
++        // no-ops as well.
++        let lines = observe.babr_take_observe_telemetry_json_lines(ack_now);
++        assert!(!lines.is_empty());
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++
++        observe.babr_set_observe_telemetry_enabled(false);
++        assert_eq!(observe.babr_observe_telemetry_stats().records, 0);
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++
++        observe.babr_set_observe_telemetry_enabled(true);
++        assert_babr_transport_outputs_equal(&off, &observe, DATAGRAM);
++    }
++
+     #[test]
+     fn test_high_pto_count_no_panic() {

@@ -1,0 +1,150 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -710,11 +710,7 @@
+         let input = BabrLiteInput {
+             now,
+             phase: bbr.phase,
+-            end_of_round_trip: if force_non_round {
+-                false
+-            } else {
+-                bbr.end_of_round_trip
+-            },
++            end_of_round_trip: bbr.end_of_round_trip,
+             baseline_pacing_rate_bytes_per_second:
+                 bbr.baseline_pacing_rate_bytes_per_second,
+             baseline_cwnd_bytes: bbr.baseline_cwnd_bytes,
+@@ -739,6 +735,18 @@
+         // Consume each transport guard generation at most once so one event
+         // cannot be replayed by later ACK callbacks.
+         self.babr_lite_last_guards = guards;
++        self.babr_lite_decide_input_with_round_override(
++            input, force_non_round,
++        )
++    }
++
++    fn babr_lite_decide_input_with_round_override(
++        &mut self, mut input: BabrLiteInput, force_non_round: bool,
++    ) -> BabrLiteDecision {
++        if force_non_round {
++            input.end_of_round_trip = false;
++        }
++
+         self.babr_lite_controller.on_round(input)
+     }
+ 
+@@ -1650,5 +1658,114 @@
+     }
+ 
+     #[test]
++    fn babr_lite_policy_refresh_override_does_not_advance_round_clock() {
++        let mut r = new_babr_recovery();
++        assert!(r.babr_set_lite_target_bytes_per_second(26_000_000));
++        r.babr_set_lite_mode(BabrMode::Lite);
++
++        let now = Instant::now();
++        let input = BabrLiteInput {
++            now,
++            phase: super::super::bbr2::BabrBbrPhase::ProbeBwCruise,
++            end_of_round_trip: true,
++            baseline_pacing_rate_bytes_per_second: 20_000_000,
++            baseline_cwnd_bytes: 64_000,
++            model_delivery_rate_bytes_per_second: 20_000_000,
++            sample_valid: true,
++            sample_age_rounds: 0,
++            srtt: Duration::from_millis(50),
++            min_rtt: Duration::from_millis(50),
++            path_changed: false,
++            app_limited: false,
++            receiver_limited: false,
++            policy_limited: false,
++            loss_detected: false,
++            pto_fired: false,
++        };
++
++        let first =
++            r.babr_lite_decide_input_with_round_override(input, true);
++        assert_eq!(first.weight_steps, 0);
++        assert!(!first.control_applied);
++        let deadline = r.babr_lite_deadline();
++        assert!(deadline.is_some());
++
++        let second = r.babr_lite_decide_input_with_round_override(
++            BabrLiteInput {
++                now: now + Duration::from_millis(1),
++                ..input
++            },
++            true,
++        );
++        assert_eq!(second.weight_steps, 0);
++        assert!(!second.control_applied);
++        assert_eq!(r.babr_lite_deadline(), deadline);
++
++        let real_round = r.babr_lite_decide_input_with_round_override(
++            BabrLiteInput {
++                now: now + Duration::from_millis(2),
++                ..input
++            },
++            false,
++        );
++        assert_eq!(real_round.weight_steps, 1);
++        assert!(real_round.control_applied);
++        assert_eq!(r.babr_lite_deadline(), deadline);
++    }
++
++    #[test]
++    fn babr_lite_target_setter_refreshes_only_after_valid_update() {
++        let mut r = new_babr_recovery();
++        assert!(r.babr_set_lite_target_bytes_per_second(26_000_000));
++        r.babr_set_lite_mode(BabrMode::Lite);
++
++        let decision = r.babr_lite_decide_input_with_round_override(
++            BabrLiteInput {
++                now: Instant::now(),
++                phase: super::super::bbr2::BabrBbrPhase::ProbeBwCruise,
++                end_of_round_trip: true,
++                baseline_pacing_rate_bytes_per_second: 20_000_000,
++                baseline_cwnd_bytes: 64_000,
++                model_delivery_rate_bytes_per_second: 20_000_000,
++                sample_valid: true,
++                sample_age_rounds: 0,
++                srtt: Duration::from_millis(50),
++                min_rtt: Duration::from_millis(50),
++                path_changed: false,
++                app_limited: false,
++                receiver_limited: false,
++                policy_limited: false,
++                loss_detected: false,
++                pto_fired: false,
++            },
++            false,
++        );
++        assert!(decision.control_applied);
++        r.babr_lite_publish_pacing_decision(decision);
++        let active_rate = r.babr_lite_pacing_rate_bytes_per_second;
++        assert!(active_rate.is_some());
++
++        assert!(!r.babr_set_lite_target_bytes_per_second(999_999));
++        assert_eq!(r.babr_lite_pacing_rate_bytes_per_second, active_rate);
++
++        assert!(r.babr_set_lite_target_bytes_per_second(40_000_000));
++        assert_eq!(r.babr_lite_pacing_rate_bytes_per_second, None);
++    }
++
++    #[test]
++    fn babr_lite_max_rate_setter_caps_and_restores_baseline_pacer() {
++        let mut r = new_babr_recovery();
++        let baseline_rate = r.pacing_rate();
++        assert!(baseline_rate > 1);
++        let cap = baseline_rate / 2;
++
++        r.babr_set_lite_max_rate_bytes_per_second(Some(cap));
++        assert_eq!(r.pacing_rate(), cap);
++
++        r.babr_set_lite_max_rate_bytes_per_second(None);
++        assert_eq!(r.pacing_rate(), baseline_rate);
++    }
++
++    #[test]
+     fn test_high_pto_count_no_panic() {
+         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();

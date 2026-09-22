@@ -1,0 +1,76 @@
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -668,13 +668,23 @@
+     pub(crate) fn babr_set_lite_target_bytes_per_second(
+         &mut self, target: u64,
+     ) -> bool {
+-        self.babr_lite_controller
+-            .set_target_bytes_per_second(target)
++        let updated = self
++            .babr_lite_controller
++            .set_target_bytes_per_second(target);
++        if updated && self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing_non_round(Instant::now());
++        }
++        updated
+     }
+ 
+     pub(crate) fn babr_set_lite_max_rate_bytes_per_second(
+         &mut self, max_rate: Option<u64>,
+     ) {
+         self.babr_lite_controller
+             .set_max_rate_bytes_per_second(max_rate);
++        self.pacer
++            .babr_set_policy_rate_cap_bytes_per_second(max_rate);
++        if self.babr_lite_controller.mode() == BabrMode::Lite {
++            self.babr_lite_refresh_pacing_non_round(Instant::now());
++        }
+     }
+@@ -694,16 +704,26 @@
+     pub(crate) fn babr_lite_decide_current(
+         &mut self, now: Instant,
+     ) -> BabrLiteDecision {
++        self.babr_lite_decide_current_with_round_override(now, false)
++    }
++
++    fn babr_lite_decide_current_with_round_override(
++        &mut self, now: Instant, force_non_round: bool,
++    ) -> BabrLiteDecision {
+         let snapshot = self.babr_observe_snapshot();
+         let bbr = snapshot.bbr;
+         let guards = snapshot.guards;
+         let previous = self.babr_lite_last_guards;
+         let min_rtt = self.rtt_stats.min_rtt();
+ 
+         let input = BabrLiteInput {
+             now,
+             phase: bbr.phase,
+-            end_of_round_trip: bbr.end_of_round_trip,
++            end_of_round_trip: if force_non_round {
++                false
++            } else {
++                bbr.end_of_round_trip
++            },
+             baseline_pacing_rate_bytes_per_second:
+                 bbr.baseline_pacing_rate_bytes_per_second,
+             baseline_cwnd_bytes: bbr.baseline_cwnd_bytes,
+@@ -782,7 +802,18 @@
+         let decision = self.babr_lite_decide_current(now);
+         self.babr_lite_publish_pacing_decision(decision);
+     }
+ 
++    fn babr_lite_refresh_pacing_non_round(&mut self, now: Instant) {
++        if self.babr_lite_controller.mode() != BabrMode::Lite {
++            self.babr_lite_pacing_rate_bytes_per_second = None;
++            return;
++        }
++
++        let decision =
++            self.babr_lite_decide_current_with_round_override(now, true);
++        self.babr_lite_publish_pacing_decision(decision);
++    }
++
+     pub(crate) fn babr_set_observe_telemetry_enabled(&mut self, enabled: bool) {
+         self.babr_telemetry
+             .set_enabled(enabled, self.babr_guard_counters);

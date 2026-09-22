@@ -1,0 +1,89 @@
+name: P2 CPU Profile
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/p2-cpu-profile.yml"
+  workflow_dispatch:
+    inputs:
+      profile_mode:
+        description: "Profile off, observe, or both on one persistent sample pair"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - off
+          - observe
+
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native, network, and profiling dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             cmake clang pkg-config perl nasm             iproute2 iputils-ping iperf3             linux-tools-common linux-tools-generic
+          perf --version
+
+      - name: Apply frozen-host Observe patches
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Build release binaries
+        run: |
+          cargo build             --release             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p tokio-quiche             --example async_http3_server             --features gcongestion
+          cargo build             --release             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche_apps             --bin quiche-client
+
+      - name: Capture persistent Off/Observe CPU profiles
+        env:
+          BABR_RATE_MBIT: "500"
+          BABR_ONE_WAY_DELAY_MS: "5"
+          BABR_LOSS_PCT: "0"
+          BABR_DATA_DIRECTION: "receiver_to_sender"
+          BABR_P2_CPU_PAIRS: "10"
+          BABR_P2_CPU_CONNECTIONS_PER_SAMPLE: "6"
+          BABR_P2_CPU_FLOW_BYTES: "268435456"
+          BABR_P2_CPU_WARMUP_BYTES: "67108864"
+          BABR_P2_CPU_LIMIT_RATIO: "1.0"
+          BABR_P2_CPU_PROFILE_PAIR: "5"
+          BABR_P2_CPU_PROFILE_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile_mode || 'both' }}
+          BABR_P2_CPU_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-observe-cpu-profile-artifacts
+        run: |
+          sudo -E bash tools/p2/netns/run-observe-cpu-persistent.sh
+
+      - name: Render perf reports
+        if: always()
+        run: |
+          sudo chown -R "$USER:$USER" 阶段任务书/p2-observe-cpu-profile-artifacts || true
+          shopt -s nullglob
+          for f in 阶段任务书/p2-observe-cpu-profile-artifacts/profile/*.data; do
+            perf report --stdio --no-children -i "$f" > "$f.txt"
+          done
+
+      - name: Upload CPU profile evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-cpu-profile-${{ github.sha }}
+          path: 阶段任务书/p2-observe-cpu-profile-artifacts
+          if-no-files-found: error

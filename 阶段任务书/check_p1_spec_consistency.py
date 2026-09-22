@@ -18,9 +18,9 @@ def ok(name, cond):
 
 
 def main():
-    ok("S01 v3 schema", CFG["schema_version"] == "p1-baseline-v3")
-    ok("S02 spec declares v3", "p1-baseline-v3" in SPEC)
-    ok("S03 bridge declares v3", "p1-baseline-v3" in BRIDGE)
+    ok("S01 v4 schema", CFG["schema_version"] == "p1-baseline-v4")
+    ok("S02 spec declares v4", "p1-baseline-v4" in SPEC)
+    ok("S03 bridge declares v4", "p1-baseline-v4" in BRIDGE)
     ok("S04 no stale socket-no-budget rule", "不扣辅助预算" not in SPEC)
     ok("S05 pre-debit no-refund rule present", "立即预扣且永不退款" in SPEC)
     ok("S06 admission granularity single datagram",
@@ -73,6 +73,12 @@ def main():
        "no refund" in CFG["assist"]["budget_accounting"]
        and "socket 失败不退款" in SPEC
        and "不退款" in BRIDGE)
+    ok("S21 target hysteresis semantics are explicit",
+       CFG["target"]["enter_ratio"] == 0.8
+       and CFG["target"]["exit_ratio"] == 0.9
+       and CFG["target"]["hysteresis_band_behavior"] == "preserve_current_state"
+       and "BASELINE 保持 BASELINE" in SPEC
+       and "ASSIST 保持 ASSIST" in SPEC)
 
     print("P1 spec consistency PASS")
 

@@ -1,0 +1,92 @@
+name: P2 Observe Gate
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "tools/p2/**"
+      - "patches/p2/**"
+      - "阶段任务书/P1-冻结参数与用例.json"
+      - "third_party/quiche-0.29.3"
+      - ".gitmodules"
+      - ".github/workflows/p2-gate.yml"
+  workflow_dispatch:
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout with frozen host submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Fast P2 preflight
+        run: bash tools/p2/preflight.sh
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config perl nasm
+
+      - name: Verify deterministic Observe reference model
+        run: bash tools/p2/verify_observe.sh
+
+      - name: Apply frozen-host Observe patches
+        run: bash tools/p2/apply-host-patches.sh
+
+      - name: Build and test patched quiche host
+        run: |
+          cargo test \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p quiche \
+            --lib \
+            --features gcongestion
+
+      - name: Verify host-level Off equals Observe transport outputs
+        run: |
+          cargo test \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p quiche \
+            --lib \
+            --features gcongestion \
+            babr_off_observe_host_outputs_identical_with_telemetry_toggle \
+            -- --nocapture
+
+      - name: Build and test patched tokio-quiche IO bridge
+        run: |
+          cargo test \
+            --manifest-path third_party/quiche-0.29.3/Cargo.toml \
+            -p tokio-quiche \
+            --lib \
+            --features gcongestion
+
+      - name: Verify patch remains behavior-read-only at integration boundary
+        run: |
+          git -C third_party/quiche-0.29.3 diff --check
+          git -C third_party/quiche-0.29.3 diff -- \
+            quiche/src/recovery/gcongestion/bbr2.rs \
+            quiche/src/recovery/gcongestion/babr_telemetry.rs \
+            quiche/src/recovery/gcongestion/pacer.rs \
+            quiche/src/recovery/gcongestion/recovery.rs \
+            quiche/src/recovery/mod.rs \
+            quiche/src/lib.rs \
+            tokio-quiche/src/quic/io/worker.rs \
+            tokio-quiche/src/http3/driver/mod.rs \
+            > /tmp/p2-observe-host.diff
+          ! grep -E '^[+].*(final_pacing|set_pacing|limit_cwnd\(|can_send\(|max_pacing_rate =|burst_tokens =)' /tmp/p2-observe-host.diff
+
+      - name: Upload P2 Observe host diff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-observe-host-diff-${{ github.sha }}
+          path: /tmp/p2-observe-host.diff
+          if-no-files-found: warn
