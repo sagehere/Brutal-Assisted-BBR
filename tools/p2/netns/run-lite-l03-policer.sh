@@ -42,9 +42,14 @@ bash "$HERE/setup.sh" >/dev/null
 # first exercises admission under low queue, then applies its real drop policer.
 BABR_RATE_MBIT="$POLICER_MBIT" \
   BABR_TBF_BURST_KB="$TBF_BURST_KB" \
-  BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
+BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
   BABR_DATA_DIRECTION=receiver_to_sender \
   bash "$HERE/shape.sh" >/dev/null
+
+# Retain qdisc counters so any pre-admission loss can be attributed to the
+# initial non-policing TBF/netem setup instead of inferred from Lite reasons.
+ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-before.txt"
+ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-before.txt"
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -85,6 +90,8 @@ for _ in $(seq 1 600); do
 done
 if [[ "$ASSIST_SEEN" != 1 ]]; then
   wait "$CLIENT_PID" || true
+  ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
+  ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
   # This is a valid fail-closed outcome, not permission to weaken admission,
   # CWND, or recovery rules. Preserve the trace and an explicit BLOCKED summary
   # so the G2 aggregator cannot mistake a non-exercised policer for PASS.
@@ -105,6 +112,9 @@ ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 
   action police rate "${POLICER_MBIT}mbit" burst 32kb mtu 64kb drop
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
 wait "$CLIENT_PID"
+
+ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
+ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
 
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
 if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then
