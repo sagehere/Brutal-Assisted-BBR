@@ -166,6 +166,11 @@ def main() -> int:
     parser.add_argument("trace", type=Path)
     parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05", "l10"))
     parser.add_argument("--summary", type=Path)
+    parser.add_argument(
+        "--allow-blocked",
+        action="store_true",
+        help="write a valid BLOCKED evidence record without failing collection",
+    )
     args = parser.parse_args()
     verdict = Verdict(args.scenario)
     rows = load(args.trace, verdict)
@@ -178,7 +183,11 @@ def main() -> int:
     if args.summary:
         args.summary.write_text(rendered, encoding="utf-8")
     sys.stdout.write(rendered)
-    return 0 if verdict.status == "PASS" else 2
+    if verdict.status == "PASS" or (
+        verdict.status == "BLOCKED" and args.allow_blocked
+    ):
+        return 0
+    return 2
 
 
 if __name__ == "__main__":

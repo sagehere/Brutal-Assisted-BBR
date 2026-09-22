@@ -25,11 +25,14 @@ def row(**updates):
 
 
 class LiteTraceCheckerTest(unittest.TestCase):
-    def run_check(self, records, scenario="generic"):
+    def run_check(self, records, scenario="generic", allow_blocked=False):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
             trace.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
-            return subprocess.run([sys.executable, str(CHECKER), str(trace), "--scenario", scenario], text=True, capture_output=True)
+            command = [sys.executable, str(CHECKER), str(trace), "--scenario", scenario]
+            if allow_blocked:
+                command.append("--allow-blocked")
+            return subprocess.run(command, text=True, capture_output=True)
 
     def test_valid_generic_trace_passes(self):
         self.assertEqual(self.run_check([row()]).returncode, 0)
@@ -60,6 +63,11 @@ class LiteTraceCheckerTest(unittest.TestCase):
 
     def test_l03_without_exit_blocks(self):
         self.assertNotEqual(self.run_check([row()], "l03").returncode, 0)
+
+    def test_blocked_collection_can_complete_without_claiming_pass(self):
+        result = self.run_check([row()], "l03", allow_blocked=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('\"status\": \"BLOCKED\"', result.stdout)
 
     def test_real_protected_phase_can_close_l04_network_check(self):
         self.assertEqual(self.run_check([row(phase="Startup", state="BASELINE",

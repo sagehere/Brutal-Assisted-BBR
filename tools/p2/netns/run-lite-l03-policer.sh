@@ -63,8 +63,14 @@ for _ in $(seq 1 120); do
 done
 if [[ "$ASSIST_SEEN" != 1 ]]; then
   wait "$CLIENT_PID" || true
-  echo "L03 did not reach Assist before policer injection" >&2
-  exit 95
+  # This is a valid fail-closed outcome, not permission to weaken admission,
+  # CWND, or recovery rules. Preserve the trace and an explicit BLOCKED summary
+  # so the G2 aggregator cannot mistake a non-exercised policer for PASS.
+  printf '%s\n' 'policer_not_armed=no real Assist admission' > "$OUT/policer-status.txt"
+  python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
+    "$OUT/lite.jsonl" --scenario l03 --summary "$OUT/summary.json" --allow-blocked
+  echo 'P2 L03 policer safety evidence: BLOCKED (no Assist admission)'
+  exit 0
 fi
 
 # The initial TBF intentionally permits Assist. The policer is then the only

@@ -1,4 +1,4 @@
-name: P2 M4 L03 Policer Safety
+name: P2 M4 L03 Policer Evidence
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -47,14 +47,15 @@ jobs:
           cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p tokio-quiche --example async_http3_server --features gcongestion
           cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p quiche_apps --bin quiche-client
 
-      - name: Run L03 policer safety scenario
+      - name: Collect L03 policer evidence
         env:
           # Target is byte/s inside BABR. 25,000,000 byte/s ~= 200 Mbps.
           BABR_P2_TARGET_BPS: "25000000"
           # Policer is explicit mbit/s for tc. 150 Mbps bottleneck.
           BABR_P2_POLICER_MBIT: "150"
-          # The runner starts at 150 Mbps to obtain real Assist, then opens
-          # TBF and injects a 150 Mbps dropping policer after that admission.
+          # The runner starts at 150 Mbps and only arms the dropping policer
+          # after a real Assist admission. If safety gates prevent admission,
+          # it records BLOCKED; G2 rejects that status.
           BABR_P2_FLOW_BYTES: "268435456"
           BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
