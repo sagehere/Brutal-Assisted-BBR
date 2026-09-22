@@ -38,8 +38,9 @@ bash "$HERE/setup.sh" >/dev/null
 # a later loss revokes already-active assistance.
 # The generic netns default (512 KiB / 100 ms) itself creates >20 ms queueing
 # at 150 Mbps and makes the frozen hard guard reject every Assist attempt.
-# Keep the same capacity and 64 KiB burst, with a 10 ms TBF queue cap below
-# the frozen 20 ms hard guard, then apply the real drop policer after admission.
+# Keep the same capacity and 5 ms queue cap below the frozen 20 ms hard guard.
+# The L03 workflow versions the TBF burst to accommodate sender GSO batches,
+# then applies the real drop policer only after admission.
 BABR_RATE_MBIT="$POLICER_MBIT" \
   BABR_TBF_BURST_KB="$TBF_BURST_KB" \
 BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \

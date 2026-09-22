@@ -61,11 +61,12 @@ jobs:
           # of active response producers after v2 remained APP_LIMITED.
           BABR_P2_FLOW_BYTES: "67108864"
           BABR_P2_L03_REQUESTS: "16"
-          # Versioned low-queue calibration: keep the 64 KiB burst and set a
-          # 10 ms TBF queue cap, below the frozen 20 ms hard queue guard.
-          BABR_P2_L03_TBF_BURST_KB: "64"
-          BABR_P2_L03_TBF_LATENCY_MS: "10"
-          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v6-tbf-10ms-calibration"
+          # Versioned low-queue calibration: preserve the 5 ms queue cap and
+          # enlarge the token burst for sender GSO batches. 5 ms stays below
+          # the frozen 20 ms hard queue guard.
+          BABR_P2_L03_TBF_BURST_KB: "128"
+          BABR_P2_L03_TBF_LATENCY_MS: "5"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v7-burst128-calibration"
           BABR_P2_L03_RUNS: "1"
           BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: |
