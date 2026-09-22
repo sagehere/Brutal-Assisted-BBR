@@ -69,7 +69,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs b/quiche/src
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,332 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -252,10 +252,10 @@ new file mode 100644
 +        }
 +    }
 +
-+    fn json(r: Record) -> String {
++    fn json(&self, r: Record) -> String {
 +        format!(
 +            concat!(
-+                "{{\"schema\":\"p2-lite-v1\",\"seq\":{},\"t_us\":{},",
++                "{{\"schema\":\"p2-lite-v2\",\"configuration_version\":\"p1-baseline-v4\",\"seq\":{},\"t_us\":{},",
 +                "\"phase\":\"{}\",\"state\":\"{}\",\"reason\":\"{}\",",
 +                "\"W_steps\":{},\"rounds\":{},\"target_Bps\":{},\"B_ref_Bps\":{},",
 +                "\"baseline_pacing_Bps\":{},\"candidate_pacing_Bps\":{},\"final_pacing_Bps\":{},",
@@ -263,7 +263,7 @@ new file mode 100644
 +                "\"actual_socket_sent_bytes\":{},\"budget_bytes\":{},\"budget_debit_bytes\":{},",
 +                "\"unrevocable_queue_bytes\":{},\"failure_count\":{},",
 +                "\"assist_deadline_remaining_us\":{},\"backoff_remaining_us\":{},",
-+                "\"control_applied\":{}}}"
++                "\"control_applied\":{},\"dropped_records\":{}}}"
 +            ),
 +            r.seq,
 +            r.t_us,
@@ -288,6 +288,7 @@ new file mode 100644
 +            Self::metric(r.deadline_remaining_us),
 +            Self::metric(r.backoff_remaining_us),
 +            r.control,
++            self.dropped,
 +        )
 +    }
 +
@@ -302,7 +303,7 @@ new file mode 100644
 +
 +        let mut out = Vec::new();
 +        while let Some(record) = self.records.front().copied() {
-+            let line = Self::json(record);
++            let line = self.json(record);
 +            let charge = line.len().saturating_add(1);
 +            if self.bytes_in_window.saturating_add(charge) >
 +                MAX_BYTES_PER_MINUTE
@@ -392,6 +393,8 @@ new file mode 100644
 +
 +        let lines = t.take_json_lines(exit.now);
 +        assert_eq!(lines.len(), 2);
++        assert!(lines[0].contains("\"schema\":\"p2-lite-v2\""));
++        assert!(lines[0].contains("\"configuration_version\":\"p1-baseline-v4\""));
 +        assert!(lines[0].contains("\"state\":\"ASSIST\""));
 +        assert!(lines[0].contains("\"W_steps\":1"));
 +        assert!(lines[1].contains("\"reason\":\"ASSIST_TIMEOUT\""));

@@ -48,6 +48,9 @@ jobs:
       - name: Verify M3 Lite host invariants
         run: bash tools/p2/verify-lite-host.sh
 
+      - name: Verify Lite evidence checker regressions
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_verify_g2_evidence.py
+
       - name: Run full patched quiche host tests
         run: |
           cargo test             --manifest-path third_party/quiche-0.29.3/Cargo.toml             -p quiche             --lib             --features gcongestion

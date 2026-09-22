@@ -1,4 +1,4 @@
-name: P2 M4 L03 Policier Safety
+name: P2 M4 L03 Policer Safety
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -39,6 +39,9 @@ jobs:
           bash tools/p2/preflight.sh
           bash tools/p2/apply-host-patches.sh
 
+      - name: Verify fail-closed P2 evidence checkers
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_verify_g2_evidence.py
+
       - name: Build quiche applications
         run: |
           cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p tokio-quiche --example async_http3_server --features gcongestion
@@ -50,6 +53,8 @@ jobs:
           BABR_P2_TARGET_BPS: "25000000"
           # Policer is explicit mbit/s for tc. 150 Mbps bottleneck.
           BABR_P2_POLICER_MBIT: "150"
+          # Keep the calibrated TBF above the policer so filter drops are real.
+          BABR_RATE_MBIT: "500"
           BABR_P2_FLOW_BYTES: "16777216"
           BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh

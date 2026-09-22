@@ -168,7 +168,7 @@ diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/g
 +
 +        let lines = r.babr_take_lite_telemetry_json_lines(now);
 +        assert_eq!(lines.len(), 1);
-+        assert!(lines[0].contains("\"schema\":\"p2-lite-v1\""));
++        assert!(lines[0].contains("\"schema\":\"p2-lite-v2\""));
 +        assert!(lines[0].contains("\"reason\":\"ASSIST_TIMEOUT\""));
 +    }
 +

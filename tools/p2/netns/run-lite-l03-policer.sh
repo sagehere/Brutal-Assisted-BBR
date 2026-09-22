@@ -30,9 +30,14 @@ trap cleanup EXIT
 bash "$HERE/setup.sh" >/dev/null
 BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
 
-# L03: bottleneck is deliberately below BABR target. This is a safety proof,
-# not a throughput benchmark. Keep policer units explicit in mbit.
-ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate "${POLICER_MBIT}mbit" burst 32kb latency 50ms
+# L03 uses an actual dropping policer in addition to the calibrated shaper.
+# Keep this on the QUIC data sender's egress, where receiver_to_sender HTTP/3
+# responses travel. The filter statistics are part of the evidence contract.
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" clsact
+ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 \
+  flower ip_proto udp \
+  action police rate "${POLICER_MBIT}mbit" burst 32kb mtu 64kb drop
+ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -49,34 +54,12 @@ ip netns exec "$NS_S" "$CLIENT_BIN" \
   --dump-responses "$OUT/response" \
   > "$OUT/client.log" 2>&1
 
-python3 - "$OUT/lite.jsonl" "$OUT/summary.json" <<'PY'
-import json,sys
-src,out=sys.argv[1:]
-records=[json.loads(x) for x in open(src,encoding='utf-8') if x.strip()]
-if not records:
-    raise SystemExit('no Lite telemetry')
-
-reasons={r.get('reason') for r in records}
-allowed={
-    'HARD_QUEUE_DELAY',
-    'ASSIST_TIMEOUT',
-    'ASSIST_BUDGET_EXHAUSTED',
-    'MAX_ROUNDS',
-    'NO_BENEFIT',
-    'POLICY_LIMITED',
-}
-if not reasons & allowed:
-    raise SystemExit(f'no L03 exit/control evidence: {reasons}')
-
-states=[r.get('state') for r in records]
-summary={
-    'schema':'p2-l03-v2',
-    'records':len(records),
-    'reasons':sorted(reasons),
-    'states':sorted(set(states)),
-    'hard_exit_or_control_seen':bool(reasons & allowed),
-}
-json.dump(summary,open(out,'w'),indent=2)
-PY
+ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
+if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then
+  echo "L03 policer did not drop traffic; refusing to treat the shaper as policer evidence" >&2
+  exit 94
+fi
+python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
+  "$OUT/lite.jsonl" --scenario l03 --summary "$OUT/summary.json"
 
 echo 'P2 L03 policer safety smoke: PASS'

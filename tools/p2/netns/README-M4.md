@@ -8,7 +8,7 @@ Frozen goals:
 
 - Target is not treated as available capacity.
 - Assist must remain bounded by deadline, rounds and budget.
-- Exit reason must be observable through `p2-lite-v1` telemetry.
+- Exit reason must be observable through `p2-lite-v2` telemetry.
 - This runner does not evaluate throughput improvement.
 
 L03 evidence is a prerequisite for later L04/L05/L10 runs.

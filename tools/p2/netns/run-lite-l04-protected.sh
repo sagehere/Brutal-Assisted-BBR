@@ -31,7 +31,6 @@ ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
   BABR_P2_TARGET_BPS="$TARGET_BPS" \
   BABR_P2_LITE_TELEMETRY_FILE="$OUT/lite.jsonl" \
-  BABR_P2_FORCE_PROTECTED_PHASES=1 \
   "$SERVER_BIN" --address "$D_IP:4433" --cc-algorithm bbr2 --enable-pacing \
   > "$OUT/server.log" 2>&1 &
 
@@ -45,27 +44,7 @@ ip netns exec "$NS_S" "$CLIENT_BIN" \
   --dump-responses "$OUT/response" \
   > "$OUT/client.log" 2>&1
 
-python3 - "$OUT/lite.jsonl" "$OUT/summary.json" <<'PY'
-import json
-import sys
-
-src, out = sys.argv[1:]
-records=[json.loads(x) for x in open(src, encoding='utf-8') if x.strip()]
-if not records:
-    raise SystemExit('no Lite telemetry')
-
-for r in records:
-    if r.get('state') == 'ASSIST' and float(r.get('w', 0)) > 0:
-        raise SystemExit('protected phase entered Assist')
-
-reasons=sorted({str(r.get('reason')) for r in records})
-summary={
-    'schema':'p2-l04-v1',
-    'records':len(records),
-    'reasons':reasons,
-    'protected_phase_safe':True,
-}
-json.dump(summary, open(out,'w'), indent=2)
-PY
+python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
+  "$OUT/lite.jsonl" --scenario l04 --summary "$OUT/summary.json"
 
 echo 'P2 L04 protected phase safety: PASS'
