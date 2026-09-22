@@ -60,8 +60,21 @@ jobs:
           # a one-GiB total flow, past the unchanged 30 s backoff.
           BABR_P2_FLOW_BYTES: "268435456"
           BABR_P2_L03_REQUESTS: "4"
-          BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
-        run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
+          # Versioned low-queue calibration: preserve the 150 Mbps bottleneck
+          # while avoiding a TBF buffer large enough to trip the 20 ms hard
+          # queue guard before admission can be exercised.
+          BABR_P2_L03_TBF_BURST_KB: "64"
+          BABR_P2_L03_TBF_LATENCY_MS: "5"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v2-low-queue"
+          BABR_P2_L03_RUNS: "10"
+          BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
+        run: |
+          set -euo pipefail
+          for run in $(seq -w 1 "$BABR_P2_L03_RUNS"); do
+            echo "L03 independent run $run/$BABR_P2_L03_RUNS"
+            BABR_P2_L03_ARTIFACT_DIR="$BABR_P2_L03_ARTIFACT_ROOT/run-$run" \
+              sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
+          done
 
       - name: Upload L03 evidence
         if: always()

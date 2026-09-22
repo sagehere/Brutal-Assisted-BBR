@@ -15,12 +15,15 @@ FLOW_BYTES="${BABR_P2_FLOW_BYTES:-268435456}"
 REQUESTS="${BABR_P2_L03_REQUESTS:-4}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
+TBF_BURST_KB="${BABR_P2_L03_TBF_BURST_KB:-64}"
+TBF_LATENCY_MS="${BABR_P2_L03_TBF_LATENCY_MS:-5}"
+EXPERIMENT_VERSION="${BABR_P2_L03_EXPERIMENT_VERSION:-l03-policer-v2-low-queue}"
 OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
+echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -33,7 +36,15 @@ bash "$HERE/setup.sh" >/dev/null
 # unreachable yet can enter bounded Assist without packet drops. After an
 # Assist record exists, open the shaper and add the real policer to prove that
 # a later loss revokes already-active assistance.
-BABR_RATE_MBIT="$POLICER_MBIT" BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
+# The generic netns default (512 KiB / 100 ms) itself creates >20 ms queueing
+# at 150 Mbps and makes the frozen hard guard reject every Assist attempt.
+# Keep the same capacity but bound the test shaper to 64 KiB / 5 ms so L03
+# first exercises admission under low queue, then applies its real drop policer.
+BABR_RATE_MBIT="$POLICER_MBIT" \
+  BABR_TBF_BURST_KB="$TBF_BURST_KB" \
+  BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
+  BABR_DATA_DIRECTION=receiver_to_sender \
+  bash "$HERE/shape.sh" >/dev/null
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -87,7 +98,7 @@ fi
 # The initial TBF intentionally permits Assist. The policer is then the only
 # loss source: it is installed on the actual QUIC data-sender egress and its
 # post-run overlimit counter is mandatory evidence.
-ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate 500mbit burst 64kb latency 50ms
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate 500mbit burst 64kb latency 5ms
 ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" clsact
 ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 \
   flower ip_proto udp \
