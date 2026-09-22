@@ -28,16 +28,11 @@ cleanup() {
 trap cleanup EXIT
 
 bash "$HERE/setup.sh" >/dev/null
-BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
-
-# L03 uses an actual dropping policer in addition to the calibrated shaper.
-# Keep this on the QUIC data sender's egress, where receiver_to_sender HTTP/3
-# responses travel. The filter statistics are part of the evidence contract.
-ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" clsact
-ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 \
-  flower ip_proto udp \
-  action police rate "${POLICER_MBIT}mbit" burst 32kb mtu 64kb drop
-ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
+# Start at the intended 150 Mbps capacity so the 200 Mbps Target is genuinely
+# unreachable yet can enter bounded Assist without packet drops. After an
+# Assist record exists, open the shaper and add the real policer to prove that
+# a later loss revokes already-active assistance.
+BABR_RATE_MBIT="$POLICER_MBIT" BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -52,7 +47,36 @@ ip netns exec "$NS_S" "$CLIENT_BIN" \
   --no-verify --connect-to "$D_IP:$PORT" \
   --http-version HTTP/3 \
   --dump-responses "$OUT/response" \
-  > "$OUT/client.log" 2>&1
+  > "$OUT/client.log" 2>&1 &
+CLIENT_PID=$!
+
+ASSIST_SEEN=0
+for _ in $(seq 1 120); do
+  if [[ -s "$OUT/lite.jsonl" ]] && grep -Fq '"control_applied":true' "$OUT/lite.jsonl"; then
+    ASSIST_SEEN=1
+    break
+  fi
+  if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$ASSIST_SEEN" != 1 ]]; then
+  wait "$CLIENT_PID" || true
+  echo "L03 did not reach Assist before policer injection" >&2
+  exit 95
+fi
+
+# The initial TBF intentionally permits Assist. The policer is then the only
+# loss source: it is installed on the actual QUIC data-sender egress and its
+# post-run overlimit counter is mandatory evidence.
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root tbf rate 500mbit burst 64kb latency 50ms
+ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" clsact
+ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 \
+  flower ip_proto udp \
+  action police rate "${POLICER_MBIT}mbit" burst 32kb mtu 64kb drop
+ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
+wait "$CLIENT_PID"
 
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
 if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then

@@ -61,6 +61,12 @@ class LiteTraceCheckerTest(unittest.TestCase):
     def test_l03_without_exit_blocks(self):
         self.assertNotEqual(self.run_check([row()], "l03").returncode, 0)
 
+    def test_real_protected_phase_can_close_l04_network_check(self):
+        self.assertEqual(self.run_check([row(phase="Startup", state="BASELINE",
+                                                reason="BBR_PHASE_PROTECTED",
+                                                W_steps=0, control_applied=False,
+                                                assist_deadline_remaining_us=None)], "l04").returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

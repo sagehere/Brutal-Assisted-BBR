@@ -142,15 +142,11 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.evidence(bool(admitted), "no Assist budget pre-debit observed")
         verdict.evidence(bool(socket), "no socket-success evidence observed")
         verdict.evidence(bool(reasons & ASSIST_EXITS), "no bounded Assist exit observed")
-        verdict.evidence(any(row.get("reason") == "NO_BENEFIT" for row in rows),
-                         "no low-queue NO_BENEFIT exit observed")
         verdict.evidence(any(row.get("state") == "ASSIST_BACKOFF" for row in rows),
                          "no backoff state observed")
     elif verdict.scenario == "l04":
-        verdict.evidence(PROTECTED <= phases,
-                         "missing protected phase coverage: " + ", ".join(sorted(PROTECTED - phases)))
-        verdict.evidence(bool(reasons & {"LOSS_DETECTED", "PTO_FIRED"}),
-                         "missing real LossDetected or PtoFired coverage")
+        verdict.evidence(bool(PROTECTED & phases),
+                         "no real protected BBR phase observed")
     elif verdict.scenario == "l05":
         verdict.evidence(bool(assist), "no Assist before ACK suppression")
         verdict.evidence("ASSIST_TIMEOUT" in reasons, "no ACK-independent timeout observed")

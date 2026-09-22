@@ -53,9 +53,9 @@ jobs:
           BABR_P2_TARGET_BPS: "25000000"
           # Policer is explicit mbit/s for tc. 150 Mbps bottleneck.
           BABR_P2_POLICER_MBIT: "150"
-          # Keep the calibrated TBF above the policer so filter drops are real.
-          BABR_RATE_MBIT: "500"
-          BABR_P2_FLOW_BYTES: "16777216"
+          # The runner starts at 150 Mbps to obtain real Assist, then opens
+          # TBF and injects a 150 Mbps dropping policer after that admission.
+          BABR_P2_FLOW_BYTES: "268435456"
           BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
 
