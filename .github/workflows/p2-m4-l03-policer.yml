@@ -56,17 +56,18 @@ jobs:
           # The runner starts at 150 Mbps and only arms the dropping policer
           # after a real Assist admission. If safety gates prevent admission,
           # it records BLOCKED; G2 rejects that status.
-          # Four concurrent 256 MiB streams keep one real sender supplied for
-          # a one-GiB total flow, past the unchanged 30 s backoff.
-          BABR_P2_FLOW_BYTES: "268435456"
-          BABR_P2_L03_REQUESTS: "4"
+          # Exploratory stimulus calibration only: 16 concurrent 64 MiB
+          # streams retain the same one-GiB total while increasing the number
+          # of active response producers after v2 remained APP_LIMITED.
+          BABR_P2_FLOW_BYTES: "67108864"
+          BABR_P2_L03_REQUESTS: "16"
           # Versioned low-queue calibration: preserve the 150 Mbps bottleneck
           # while avoiding a TBF buffer large enough to trip the 20 ms hard
           # queue guard before admission can be exercised.
           BABR_P2_L03_TBF_BURST_KB: "64"
           BABR_P2_L03_TBF_LATENCY_MS: "5"
-          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v2-low-queue"
-          BABR_P2_L03_RUNS: "10"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v3-16x64m-calibration"
+          BABR_P2_L03_RUNS: "1"
           BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: |
           set -euo pipefail
