@@ -15,6 +15,7 @@ FLOW_BYTES="${BABR_P2_FLOW_BYTES:-268435456}"
 REQUESTS="${BABR_P2_L03_REQUESTS:-4}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
+INITIAL_SHAPER_MBIT="${BABR_P2_L03_INITIAL_SHAPER_MBIT:-180}"
 TBF_BURST_KB="${BABR_P2_L03_TBF_BURST_KB:-64}"
 TBF_LATENCY_MS="${BABR_P2_L03_TBF_LATENCY_MS:-5}"
 EXPERIMENT_VERSION="${BABR_P2_L03_EXPERIMENT_VERSION:-l03-policer-v2-low-queue}"
@@ -23,7 +24,7 @@ OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
+echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s initial_shaper=${INITIAL_SHAPER_MBIT}mbit policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -32,16 +33,14 @@ cleanup() {
 trap cleanup EXIT
 
 bash "$HERE/setup.sh" >/dev/null
-# Start at the intended 150 Mbps capacity so the 200 Mbps Target is genuinely
-# unreachable yet can enter bounded Assist without packet drops. After an
-# Assist record exists, open the shaper and add the real policer to prove that
-# a later loss revokes already-active assistance.
+# Keep the pre-admission shaper below the 200 Mbps Target but above bounded
+# Assist headroom. After admission, open the shaper and add the actual 150 Mbps
+# drop policer to prove that later loss revokes already-active assistance.
 # The generic netns default (512 KiB / 100 ms) itself creates >20 ms queueing
 # at 150 Mbps and makes the frozen hard guard reject every Assist attempt.
-# Keep the same capacity and 5 ms queue cap below the frozen 20 ms hard guard.
-# The L03 workflow versions the TBF burst to accommodate sender GSO batches,
-# then applies the real drop policer only after admission.
-BABR_RATE_MBIT="$POLICER_MBIT" \
+# Keep the 5 ms queue cap below the frozen 20 ms hard guard. The L03 workflow
+# versions the pre-admission shaper separately from the real drop policer.
+BABR_RATE_MBIT="$INITIAL_SHAPER_MBIT" \
   BABR_TBF_BURST_KB="$TBF_BURST_KB" \
 BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
   BABR_DATA_DIRECTION=receiver_to_sender \
@@ -65,7 +64,7 @@ ip netns exec "$NS_D" env \
 
 sleep 1
 # The example server feeds a single response through a bounded channel, which
-# can make every sample application-limited. Four concurrent real H3 streams
+# can make every sample application-limited. Concurrent real H3 streams
 # keep the same connection's sender supplied without changing BBR or Lite.
 CLIENT_URL="https://test.com/stream-bytes/$FLOW_BYTES"
 CLIENT_URLS=()
