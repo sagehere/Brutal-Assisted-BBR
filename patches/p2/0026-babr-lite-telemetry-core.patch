@@ -69,7 +69,7 @@ diff --git a/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs b/quiche/src
 new file mode 100644
 --- /dev/null
 +++ b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,331 @@
 +// Copyright (C) 2024, Cloudflare, Inc.
 +// All rights reserved.
 +//
@@ -401,4 +401,3 @@ new file mode 100644
 +        assert!(lines[1].contains("\"failure_count\":1"));
 +    }
 +}
-+
