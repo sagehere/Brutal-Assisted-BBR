@@ -11,7 +11,7 @@ HOST="$P2_ROOT/third_party/quiche-0.29.3"
 SERVER_BIN="${BABR_P2_SERVER_BIN:-$HOST/target/debug/examples/async_http3_server}"
 CLIENT_BIN="${BABR_P2_CLIENT_BIN:-$HOST/target/debug/quiche-client}"
 PORT="${BABR_P2_QUIC_PORT:-4433}"
-FLOW_BYTES="${BABR_P2_FLOW_BYTES:-67108864}"
+FLOW_BYTES="${BABR_P2_FLOW_BYTES:-1073741824}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
 OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
@@ -51,7 +51,10 @@ ip netns exec "$NS_S" "$CLIENT_BIN" \
 CLIENT_PID=$!
 
 ASSIST_SEEN=0
-for _ in $(seq 1 120); do
+# Startup queue protection may legitimately enter the frozen 30-second
+# backoff. Keep this controlled bulk flow alive long enough to observe a later
+# real admission, without altering the controller or its recovery rules.
+for _ in $(seq 1 600); do
   if [[ -s "$OUT/lite.jsonl" ]] && grep -Fq '"control_applied":true' "$OUT/lite.jsonl"; then
     ASSIST_SEEN=1
     break

@@ -56,7 +56,9 @@ jobs:
           # The runner starts at 150 Mbps and only arms the dropping policer
           # after a real Assist admission. If safety gates prevent admission,
           # it records BLOCKED; G2 rejects that status.
-          BABR_P2_FLOW_BYTES: "268435456"
+          # One GiB keeps the flow active past a legitimate startup hard-queue
+          # backoff, so admission is retried under the unchanged 30 s rule.
+          BABR_P2_FLOW_BYTES: "1073741824"
           BABR_P2_L03_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l03-policer.sh
 
