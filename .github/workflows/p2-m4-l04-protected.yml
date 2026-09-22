@@ -1,0 +1,61 @@
+name: P2 M4 L04 Protected Phase Safety
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/netns/**"
+      - "tools/p2/preflight.sh"
+      - "tools/p2/apply-host-patches.sh"
+      - "third_party/quiche-0.29.3"
+      - ".github/workflows/p2-m4-l04-protected.yml"
+  workflow_dispatch:
+
+jobs:
+  l04:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout frozen host
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config perl nasm iproute2 iputils-ping iperf3 time
+
+      - name: Apply P2 patches
+        run: |
+          bash tools/p2/preflight.sh
+          bash tools/p2/apply-host-patches.sh
+
+      - name: Build quiche applications
+        run: |
+          cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p tokio-quiche --example async_http3_server --features gcongestion
+          cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p quiche_apps --bin quiche-client
+
+      - name: Run L04 protected phase safety scenario
+        env:
+          BABR_P2_FLOW_BYTES: "16777216"
+          BABR_P2_TARGET_BPS: "25000000"
+          BABR_P2_L04_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l04-artifacts
+        run: sudo -E bash tools/p2/netns/run-lite-l04-protected.sh
+
+      - name: Upload L04 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-l04-${{ github.sha }}
+          path: 阶段任务书/p2-l04-artifacts
+          if-no-files-found: error
