@@ -1,0 +1,244 @@
+diff --git a/quiche/src/lib.rs b/quiche/src/lib.rs
+index b809b6e..ab19546 100644
+--- a/quiche/src/lib.rs
++++ b/quiche/src/lib.rs
+@@ -7642,10 +7642,18 @@ impl<F: BufFactory> Connection<F> {
+             }
+         }
+ 
+-        self.paths
+-            .get_mut(path_id)?
+-            .recovery
+-            .babr_set_lite_telemetry_enabled(enabled);
++        let connection_tag = self.source_id().as_ref().iter().fold(
++            0xcbf29ce484222325_u64,
++            |hash, byte| {
++                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
++            },
++        );
++
++        let recovery = &mut self.paths.get_mut(path_id)?.recovery;
++        recovery.babr_set_lite_telemetry_enabled(enabled);
++        if enabled {
++            recovery.babr_set_lite_telemetry_identity(connection_tag, path_id as u64);
++        }
+         Ok(())
+     }
+ 
+diff --git a/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
+index 87916b5..37e05cc 100644
+--- a/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite_telemetry.rs
+@@ -22,6 +22,11 @@ const NA: u64 = u64::MAX;
+ pub(crate) struct BabrLiteTelemetryInput {
+     pub(crate) now: Instant,
+     pub(crate) phase: BabrBbrPhase,
++    pub(crate) inflight_bytes: u64,
++    pub(crate) srtt_us: u64,
++    pub(crate) min_rtt_us: Option<u64>,
++    pub(crate) sample_valid: bool,
++    pub(crate) sample_age_rounds: u8,
+     pub(crate) baseline_pacing_rate_bytes_per_second: u64,
+     pub(crate) baseline_cwnd_bytes: usize,
+     pub(crate) model_delivery_rate_bytes_per_second: u64,
+@@ -35,6 +40,8 @@ pub(crate) struct BabrLiteTelemetryInput {
+ struct Record {
+     seq: u64,
+     t_us: u64,
++    connection_tag: u64,
++    path_id: u64,
+     target: u64,
+     b_ref: u64,
+     baseline_pacing: u64,
+@@ -46,6 +53,12 @@ struct Record {
+     budget: u64,
+     budget_debit: u64,
+     unrevocable_queue: u64,
++    inflight: u64,
++    srtt_us: u64,
++    min_rtt_us: u64,
++    sample_valid: bool,
++    sample_age_rounds: u8,
++    deadline_monotonic_us: u64,
+     deadline_remaining_us: u64,
+     backoff_remaining_us: u64,
+     cwnd: u32,
+@@ -72,6 +85,10 @@ impl Record {
+             self.budget == other.budget &&
+             self.budget_debit == other.budget_debit &&
+             self.unrevocable_queue == other.unrevocable_queue &&
++            self.connection_tag == other.connection_tag &&
++            self.path_id == other.path_id &&
++            self.sample_valid == other.sample_valid &&
++            self.sample_age_rounds == other.sample_age_rounds &&
+             self.failures == other.failures &&
+             self.control == other.control
+     }
+@@ -87,6 +104,8 @@ pub(crate) struct BabrLiteTelemetry {
+     epoch: Option<Instant>,
+     window_started: Option<Instant>,
+     bytes_in_window: usize,
++    connection_tag: Option<u64>,
++    path_id: Option<u64>,
+ }
+ 
+ impl BabrLiteTelemetry {
+@@ -102,6 +121,11 @@ impl BabrLiteTelemetry {
+         }
+     }
+ 
++    pub(crate) fn set_identity(&mut self, connection_tag: u64, path_id: u64) {
++        self.connection_tag = Some(connection_tag);
++        self.path_id = Some(path_id);
++    }
++
+     fn opt(v: Option<u64>) -> u64 {
+         v.unwrap_or(NA)
+     }
+@@ -113,6 +137,13 @@ impl BabrLiteTelemetry {
+             .unwrap_or(NA)
+     }
+ 
++    fn monotonic_since(epoch: Instant, instant: Option<Instant>) -> u64 {
++        instant
++            .map(|d| d.saturating_duration_since(epoch).as_micros())
++            .map(|v| v.min(u64::MAX as u128) as u64)
++            .unwrap_or(NA)
++    }
++
+     pub(crate) fn record_if_changed(&mut self, i: BabrLiteTelemetryInput) {
+         if !self.enabled {
+             return;
+@@ -127,6 +158,8 @@ impl BabrLiteTelemetry {
+                 .saturating_duration_since(epoch)
+                 .as_micros()
+                 .min(u64::MAX as u128) as u64,
++            connection_tag: Self::opt(self.connection_tag),
++            path_id: Self::opt(self.path_id),
+             target: c.target_bytes_per_second,
+             b_ref: Self::opt(c.reference_rate_bytes_per_second),
+             baseline_pacing: i.baseline_pacing_rate_bytes_per_second,
+@@ -138,6 +171,12 @@ impl BabrLiteTelemetry {
+             budget: c.assist_budget_bytes,
+             budget_debit: c.assist_budget_debit_bytes,
+             unrevocable_queue: c.assist_unrevocable_queue_bytes,
++            inflight: i.inflight_bytes,
++            srtt_us: i.srtt_us,
++            min_rtt_us: Self::opt(i.min_rtt_us),
++            sample_valid: i.sample_valid,
++            sample_age_rounds: i.sample_age_rounds,
++            deadline_monotonic_us: Self::monotonic_since(epoch, c.assist_deadline),
+             deadline_remaining_us: Self::remaining(i.now, c.assist_deadline),
+             backoff_remaining_us: Self::remaining(i.now, c.backoff_deadline),
+             cwnd: u32::try_from(i.baseline_cwnd_bytes).unwrap_or(u32::MAX),
+@@ -184,17 +223,21 @@ impl BabrLiteTelemetry {
+         format!(
+             concat!(
+                 "{{\"schema\":\"p2-lite-v2\",\"configuration_version\":\"p1-baseline-v4\",\"seq\":{},\"t_us\":{},",
++                "\"connection_tag\":{},\"path_id\":{},",
+                 "\"phase\":\"{}\",\"state\":\"{}\",\"reason\":\"{}\",",
+                 "\"W_steps\":{},\"rounds\":{},\"target_Bps\":{},\"B_ref_Bps\":{},",
+                 "\"baseline_pacing_Bps\":{},\"candidate_pacing_Bps\":{},\"final_pacing_Bps\":{},",
+                 "\"baseline_cwnd_bytes\":{},\"model_delivery_Bps\":{},\"unique_payload_bytes\":{},",
+                 "\"actual_socket_sent_bytes\":{},\"budget_bytes\":{},\"budget_debit_bytes\":{},",
+-                "\"unrevocable_queue_bytes\":{},\"failure_count\":{},",
+-                "\"assist_deadline_remaining_us\":{},\"backoff_remaining_us\":{},",
++                "\"unrevocable_queue_bytes\":{},\"inflight_bytes\":{},\"srtt_us\":{},\"min_rtt_us\":{},",
++                "\"sample_valid\":{},\"sample_age_rounds\":{},\"failure_count\":{},",
++                "\"assist_deadline_monotonic_us\":{},\"assist_deadline_remaining_us\":{},\"backoff_remaining_us\":{},",
+                 "\"control_applied\":{},\"dropped_records\":{}}}"
+             ),
+             r.seq,
+             r.t_us,
++            Self::metric(r.connection_tag),
++            Self::metric(r.path_id),
+             r.phase.as_str(),
+             Self::state_name(r.state),
+             r.reason.as_str(),
+@@ -212,7 +255,13 @@ impl BabrLiteTelemetry {
+             r.budget,
+             r.budget_debit,
+             r.unrevocable_queue,
++            r.inflight,
++            r.srtt_us,
++            Self::metric(r.min_rtt_us),
++            r.sample_valid,
++            r.sample_age_rounds,
+             r.failures,
++            Self::metric(r.deadline_monotonic_us),
+             Self::metric(r.deadline_remaining_us),
+             Self::metric(r.backoff_remaining_us),
+             r.control,
+@@ -286,6 +335,11 @@ mod tests {
+         let input = BabrLiteTelemetryInput {
+             now,
+             phase: BabrBbrPhase::ProbeBwCruise,
++            inflight_bytes: 12_000,
++            srtt_us: 10_000,
++            min_rtt_us: Some(8_000),
++            sample_valid: true,
++            sample_age_rounds: 0,
+             baseline_pacing_rate_bytes_per_second: 20_000_000,
+             baseline_cwnd_bytes: 64_000,
+             model_delivery_rate_bytes_per_second: 20_000_000,
+@@ -300,6 +354,7 @@ mod tests {
+         assert!(t.take_json_lines(now).is_empty());
+ 
+         t.set_enabled(true);
++        t.set_identity(42, 0);
+         t.record_if_changed(input);
+         t.record_if_changed(BabrLiteTelemetryInput {
+             now: now + Duration::from_millis(1),
+diff --git a/quiche/src/recovery/gcongestion/recovery.rs b/quiche/src/recovery/gcongestion/recovery.rs
+index 1a34c28..567e227 100644
+--- a/quiche/src/recovery/gcongestion/recovery.rs
++++ b/quiche/src/recovery/gcongestion/recovery.rs
+@@ -807,6 +807,14 @@ impl GRecovery {
+         }
+     }
+ 
++    pub(crate) fn babr_set_lite_telemetry_identity(
++        &mut self, connection_tag: u64, path_id: u64,
++    ) {
++        if let Some(telemetry) = self.babr_lite_telemetry.as_mut() {
++            telemetry.set_identity(connection_tag, path_id);
++        }
++    }
++
+     pub(crate) fn babr_take_lite_telemetry_json_lines(
+         &mut self, now: Instant,
+     ) -> Vec<String> {
+@@ -830,6 +838,14 @@ impl GRecovery {
+         let input = BabrLiteTelemetryInput {
+             now,
+             phase: snapshot.bbr.phase,
++            inflight_bytes: self.bytes_in_flight.get() as u64,
++            srtt_us: self.rtt_stats.rtt().as_micros().min(u64::MAX as u128)
++                as u64,
++            min_rtt_us: self.rtt_stats.min_rtt().map(|rtt| {
++                rtt.as_micros().min(u64::MAX as u128) as u64
++            }),
++            sample_valid: snapshot.bbr.delivery_sample_valid,
++            sample_age_rounds: snapshot.bbr.sample_age_rounds,
+             baseline_pacing_rate_bytes_per_second:
+                 snapshot.bbr.baseline_pacing_rate_bytes_per_second,
+             baseline_cwnd_bytes: snapshot.bbr.baseline_cwnd_bytes,
+diff --git a/quiche/src/recovery/mod.rs b/quiche/src/recovery/mod.rs
+index b648a94..a21209d 100644
+--- a/quiche/src/recovery/mod.rs
++++ b/quiche/src/recovery/mod.rs
+@@ -400,6 +400,14 @@ impl Recovery {
+         }
+     }
+ 
++    pub(crate) fn babr_set_lite_telemetry_identity(
++        &mut self, connection_tag: u64, path_id: u64,
++    ) {
++        if let Recovery::GCongestion(recovery) = self {
++            recovery.babr_set_lite_telemetry_identity(connection_tag, path_id);
++        }
++    }
++
+     pub(crate) fn babr_take_lite_telemetry_json_lines(
+         &mut self, now: Instant,
+     ) -> Vec<String> {

@@ -31,10 +31,13 @@ ASSIST_EXITS = {
     "HARD_QUEUE_DELAY", "NO_BENEFIT", "LOSS_DETECTED", "PTO_FIRED",
 }
 REQUIRED = {
-    "schema", "seq", "t_us", "phase", "state", "reason", "W_steps",
+    "schema", "configuration_version", "seq", "t_us", "connection_tag",
+    "path_id", "phase", "state", "reason", "W_steps",
     "rounds", "target_Bps", "B_ref_Bps", "budget_bytes",
     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
     "control_applied", "actual_socket_sent_bytes", "dropped_records",
+    "inflight_bytes", "srtt_us", "min_rtt_us", "sample_valid",
+    "sample_age_rounds", "assist_deadline_monotonic_us",
     "assist_deadline_remaining_us", "backoff_remaining_us",
 }
 
@@ -93,14 +96,25 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         if missing:
             continue
         verdict.require(row["schema"] == SCHEMA, f"record {index}: schema must be {SCHEMA}")
+        verdict.require(row["configuration_version"] == "p1-baseline-v4",
+                        f"record {index}: unknown configuration version")
         verdict.require(row["reason"] in REASONS, f"record {index}: unknown reason {row['reason']!r}")
-        for key in ("seq", "t_us", "W_steps", "rounds", "target_Bps", "budget_bytes",
+        verdict.require(isinstance(row["phase"], str) and isinstance(row["state"], str),
+                        f"record {index}: phase and state must be strings")
+        for key in ("seq", "t_us", "connection_tag", "path_id", "W_steps", "rounds", "target_Bps", "budget_bytes",
                     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
-                    "dropped_records"):
+                    "dropped_records", "inflight_bytes", "srtt_us", "sample_age_rounds"):
             verdict.require(numeric(row[key]) and row[key] >= 0,
                             f"record {index}: {key} must be a finite non-negative number")
         verdict.require(isinstance(row["control_applied"], bool),
                         f"record {index}: control_applied must be boolean")
+        verdict.require(isinstance(row["sample_valid"], bool),
+                        f"record {index}: sample_valid must be boolean")
+        for key in ("B_ref_Bps", "actual_socket_sent_bytes", "min_rtt_us",
+                    "assist_deadline_monotonic_us", "assist_deadline_remaining_us",
+                    "backoff_remaining_us"):
+            verdict.require(row[key] is None or (numeric(row[key]) and row[key] >= 0),
+                            f"record {index}: {key} must be null or a finite non-negative number")
         if numeric(row["seq"]):
             verdict.require(row["seq"] > previous_seq, f"record {index}: seq is not strictly monotonic")
             previous_seq = row["seq"]
@@ -120,6 +134,9 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
             verdict.require(numeric(row["assist_deadline_remaining_us"]) and
                             row["assist_deadline_remaining_us"] > 0,
                             f"record {index}: Assist authorization is expired or unavailable")
+            verdict.require(numeric(row["assist_deadline_monotonic_us"]) and
+                            row["assist_deadline_monotonic_us"] > row["t_us"],
+                            f"record {index}: Assist authorization has no absolute future deadline")
         if row["reason"] == "BACKOFF_ACTIVE":
             verdict.require(row["failure_count"] > 0 and
                             numeric(row["backoff_remaining_us"]) and
@@ -133,14 +150,30 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
     assist = [row for row in rows if row.get("state") == "ASSIST" and row.get("control_applied")]
     admitted = [row for row in assist if numeric(row.get("budget_debit_bytes")) and row["budget_debit_bytes"] > 0]
     socket = [row for row in rows if numeric(row.get("actual_socket_sent_bytes")) and row["actual_socket_sent_bytes"] > 0]
+    socket_after_admission = False
+    admission_indices = [index for index, row in enumerate(rows)
+                         if row.get("state") == "ASSIST" and
+                         row.get("control_applied") and
+                         numeric(row.get("budget_debit_bytes")) and
+                         row["budget_debit_bytes"] > 0]
+    if admission_indices:
+        first_admission = admission_indices[0]
+        before = [row.get("actual_socket_sent_bytes") for row in rows[:first_admission]
+                  if numeric(row.get("actual_socket_sent_bytes"))]
+        after = [row.get("actual_socket_sent_bytes") for row in rows[first_admission + 1:]
+                 if numeric(row.get("actual_socket_sent_bytes"))]
+        socket_after_admission = bool(after) and max(after) > max(before, default=0)
     verdict.facts.update(records=len(rows), phases=sorted(phases), reasons=sorted(reasons),
                          assist_records=len(assist), admitted_records=len(admitted),
-                         socket_evidence_records=len(socket))
+                         socket_evidence_records=len(socket),
+                         socket_progress_after_admission=socket_after_admission)
 
     if verdict.scenario == "l03":
         verdict.evidence(bool(assist), "no real Assist decision observed")
         verdict.evidence(bool(admitted), "no Assist budget pre-debit observed")
         verdict.evidence(bool(socket), "no socket-success evidence observed")
+        verdict.evidence(socket_after_admission,
+                         "no socket-byte progress after an Assist admission")
         verdict.evidence(bool(reasons & ASSIST_EXITS), "no bounded Assist exit observed")
         verdict.evidence(any(row.get("state") == "ASSIST_BACKOFF" for row in rows),
                          "no backoff state observed")
