@@ -68,7 +68,10 @@ jobs:
       - name: Collect independent no-ACK host deadline and recovery evidence
         env:
           BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
-        run: bash tools/p2/netns/run-lite-l05-host.sh
+        run: |
+          # The namespace collector above ran as root and owns the artifact tree.
+          sudo chown -R "$(id -u):$(id -g)" 阶段任务书/p2-l05-artifacts
+          bash tools/p2/netns/run-lite-l05-host.sh
 
       - name: Compose both L05 subgates on this code revision
         run: |
