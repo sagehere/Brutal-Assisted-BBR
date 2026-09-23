@@ -26,7 +26,7 @@ OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s pre_shaper=${PRE_SHAPER_KIND}:${INITIAL_SHAPER_MBIT}mbit netem_limit=${NETEM_LIMIT_PACKETS}packets policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
+echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s pre_shaper=${PRE_SHAPER_KIND}:${INITIAL_SHAPER_MBIT}mbit flow_limit=${NETEM_LIMIT_PACKETS}packets policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -59,6 +59,16 @@ case "$PRE_SHAPER_KIND" in
     ip netns exec "$NS_R" tc qdisc replace dev "$R_S_IF" root netem \
       rate "${INITIAL_SHAPER_MBIT}mbit" limit "$NETEM_LIMIT_PACKETS"
     ;;
+  fq-maxrate)
+    # Pace the locally generated QUIC socket at the 150 Mbps cap, where FQ
+    # can use socket pacing, and move the 20 ms data-path propagation delay to
+    # the router. Keep the per-socket enqueue limit near an 8 ms queue budget.
+    ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root fq \
+      maxrate "${INITIAL_SHAPER_MBIT}mbit" \
+      flow_limit "$NETEM_LIMIT_PACKETS" limit 1000
+    ip netns exec "$NS_R" tc qdisc replace dev "$R_S_IF" root netem \
+      delay 20ms
+    ;;
   *)
     echo "Unsupported L03 pre-admission shaper: $PRE_SHAPER_KIND" >&2
     exit 94
@@ -67,12 +77,12 @@ esac
 
 # Retain qdisc counters so any pre-admission loss can be attributed to the
 # router rate qdisc or server netem instead of inferred from Lite reasons.
-ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-before.txt"
-ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-before.txt"
-echo "Initial router data qdisc before transfer ($R_S_IF):"
-cat "$OUT/initial-router-data-qdisc-before.txt"
-echo "Server data qdisc before transfer ($D_IF):"
-cat "$OUT/server-data-qdisc-before.txt"
+ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-before.txt"
+ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-before.txt"
+echo "Router data qdisc before transfer ($R_S_IF):"
+cat "$OUT/router-data-qdisc-before.txt"
+echo "Sender data qdisc before transfer ($D_IF):"
+cat "$OUT/sender-data-qdisc-before.txt"
 
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
@@ -113,12 +123,12 @@ for _ in $(seq 1 600); do
 done
 if [[ "$ASSIST_SEEN" != 1 ]]; then
   wait "$CLIENT_PID" || true
-  ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
-  ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
-  echo "Initial router data qdisc after transfer ($R_S_IF):"
-  cat "$OUT/initial-router-data-qdisc-after.txt"
-  echo "Server data qdisc after transfer ($D_IF):"
-  cat "$OUT/server-data-qdisc-after.txt"
+  ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-after.txt"
+  ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-after.txt"
+  echo "Router data qdisc after transfer ($R_S_IF):"
+  cat "$OUT/router-data-qdisc-after.txt"
+  echo "Sender data qdisc after transfer ($D_IF):"
+  cat "$OUT/sender-data-qdisc-after.txt"
   # This is a valid fail-closed outcome, not permission to weaken admission,
   # CWND, or recovery rules. Preserve the trace and an explicit BLOCKED summary
   # so the G2 aggregator cannot mistake a non-exercised policer for PASS.
@@ -140,12 +150,12 @@ ip netns exec "$NS_D" tc filter replace dev "$D_IF" egress protocol ip pref 100 
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-before.txt"
 wait "$CLIENT_PID"
 
-ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-after.txt"
-ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-after.txt"
-echo "Initial router data qdisc after transfer ($R_S_IF):"
-cat "$OUT/initial-router-data-qdisc-after.txt"
-echo "Server data qdisc after transfer ($D_IF):"
-cat "$OUT/server-data-qdisc-after.txt"
+ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-after.txt"
+ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-after.txt"
+echo "Router data qdisc after transfer ($R_S_IF):"
+cat "$OUT/router-data-qdisc-after.txt"
+echo "Sender data qdisc after transfer ($D_IF):"
+cat "$OUT/sender-data-qdisc-after.txt"
 
 ip netns exec "$NS_D" tc -s filter show dev "$D_IF" egress > "$OUT/policer-filter-after.txt"
 if ! grep -Eq 'overlimits [1-9][0-9]*' "$OUT/policer-filter-after.txt"; then

@@ -53,11 +53,12 @@ jobs:
           BABR_P2_TARGET_BPS: "25000000"
           # Policer is explicit mbit/s for tc. 150 Mbps bottleneck.
           BABR_P2_POLICER_MBIT: "150"
-          # Keep the pre-admission rate below the 160 Mbps (0.8x Target)
-          # entry boundary, but replace the lossy TBF bucket with netem rate.
-          # A real 150 Mbps UDP drop policer is still armed only after Assist.
+          # Keep the per-socket pre-admission cap below the 160 Mbps (0.8x
+          # Target) entry boundary using FQ pacing; move the 20 ms path delay
+          # to the router. The real 150 Mbps UDP drop policer still arms only
+          # after Assist admission.
           BABR_P2_L03_INITIAL_SHAPER_MBIT: "150"
-          BABR_P2_L03_PRE_SHAPER_KIND: "netem-rate"
+          BABR_P2_L03_PRE_SHAPER_KIND: "fq-maxrate"
           BABR_P2_L03_NETEM_LIMIT_PACKETS: "100"
           # The runner records BLOCKED if safety gates prevent admission; G2
           # rejects that status.
@@ -69,7 +70,7 @@ jobs:
           # Low-queue settings remain below the frozen 20 ms hard queue guard.
           BABR_P2_L03_TBF_BURST_KB: "64"
           BABR_P2_L03_TBF_LATENCY_MS: "5"
-          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v10-netem-rate150-calibration"
+          BABR_P2_L03_EXPERIMENT_VERSION: "l03-policer-v11-fq-maxrate150-calibration"
           BABR_P2_L03_RUNS: "1"
           BABR_P2_L03_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l03-artifacts
         run: |
