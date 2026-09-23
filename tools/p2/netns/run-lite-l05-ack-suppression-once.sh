@@ -170,6 +170,37 @@ import time
 with open(sys.argv[1], "a", encoding="utf-8") as output:
     output.write(f"ack_filter_armed=1\nack_filter_install_end_monotonic_ns={time.monotonic_ns()}\n")
 PY
+  # Confirm a new, live Assist telemetry record after the filter installation.
+  python3 - "$OUT/lite.jsonl" "$OUT/ack-suppression-status.txt" "$OUT/ack-admission-observed.txt" <<'PYEND'
+import json, os, sys, time
+trace, status, admission = sys.argv[1:]
+observed = dict(line.strip().split("=", 1) for line in open(admission, encoding="utf-8"))
+deadline = int(observed["admission_deadline_t_us"])
+try:
+    lines = open(trace, encoding="utf-8").read().splitlines()
+    first_seq = json.loads(lines[-1])["seq"] if lines else 0
+except (OSError, ValueError, json.JSONDecodeError):
+    first_seq = 0
+last_seq = None
+until = time.monotonic() + 0.05
+while time.monotonic() < until:
+    try:
+        lines = open(trace, encoding="utf-8").read().splitlines()
+        latest = json.loads(lines[-1]) if lines else {}
+        if (latest.get("seq", 0) > first_seq and latest.get("state") == "ASSIST"
+                and latest.get("assist_deadline_monotonic_us") == deadline
+                and latest.get("control_applied") is True
+                and time.time_ns() - os.stat(trace).st_mtime_ns < 20_000_000):
+            last_seq = latest["seq"]
+            break
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    time.sleep(0.002)
+with open(status, "a", encoding="utf-8") as output:
+    output.write(f"ack_filter_active_during_assist={int(last_seq is not None)}\n")
+    if last_seq is not None:
+        output.write(f"ack_filter_install_last_seq={last_seq}\n")
+PYEND
 else
   printf 'ack_filter_armed=0\nreason=no real Assist admission with budget pre-debit\n' \
     > "$OUT/ack-suppression-status.txt"
@@ -203,8 +234,14 @@ printf 'router_ack_packets_dropped=%s\n' "$ACK_DROP_COUNT" \
 
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-after.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-after.txt"
+L05_ARGS=()
+if grep -qx 'ack_filter_active_during_assist=1' "$OUT/ack-suppression-status.txt"; then
+  L05_ARGS+=(--ack-filter-active-during-assist)
+  L05_ARGS+=(--ack-filter-install-last-seq "$(sed -n 's/^ack_filter_install_last_seq=//p' "$OUT/ack-suppression-status.txt")")
+fi
 python3 "$P2_ROOT/tools/p2/replay/check_lite_trace.py" \
-  "$OUT/lite.jsonl" --scenario l05 --ack-drop-count "$ACK_DROP_COUNT" \
+  "$OUT/lite.jsonl" --scenario l05-network --ack-drop-count "$ACK_DROP_COUNT" \
+  "${L05_ARGS[@]}" \
   --summary "$OUT/summary.json" --allow-blocked
 if [[ "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["status"])' "$OUT/summary.json")" == PASS ]]; then
   echo 'P2 L05 real ACK suppression safety evidence: PASS'

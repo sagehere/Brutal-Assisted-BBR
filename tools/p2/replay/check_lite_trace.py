@@ -202,17 +202,32 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
     elif verdict.scenario == "l04":
         verdict.evidence(bool(PROTECTED & phases),
                          "no real protected BBR phase observed")
-    elif verdict.scenario == "l05":
-        verdict.evidence(bool(assist), "no Assist before ACK suppression")
-        verdict.evidence("ASSIST_TIMEOUT" in reasons, "no ACK-independent timeout observed")
-        verdict.evidence(timeout_after_assist_deadline,
-                         "Assist timeout did not occur at or after an admitted deadline")
-        verdict.evidence("PTO_FIRED" in reasons, "no legal PTO evidence observed")
-        verdict.evidence(bool(socket), "no real socket-send evidence observed")
-        verdict.evidence(socket_after_timeout,
-                         "no socket-send progress after the Assist deadline expired")
+    elif verdict.scenario == "l05-network":
+        verdict.evidence(bool(admitted), "no real Assist budget pre-debit")
         verdict.evidence(ack_drop_count is not None and ack_drop_count > 0,
                          "no router ACK-drop counter evidence")
+        install_seq = verdict.facts.get("ack_filter_install_last_seq")
+        verdict.evidence(bool(verdict.facts.get("ack_filter_active_during_assist")) and
+                         numeric(install_seq) and any(
+                             r.get("seq") == install_seq and r.get("state") == "ASSIST"
+                             and r.get("control_applied") for r in rows),
+                         "ACK drop was not verified during a live admitted Assist")
+        exits = [i for i, r in enumerate(rows)
+                 if r.get("reason") in ASSIST_EXITS and
+                 r.get("state") == "ASSIST_BACKOFF" and
+                 numeric(install_seq) and numeric(r.get("seq")) and
+                 r["seq"] > install_seq and any(j < i for j in admission_indices)]
+        verdict.evidence(bool(exits), "no bounded safety exit after ACK filter installation")
+        if exits:
+            first_exit = exits[0]
+            verdict.require(all(not (r.get("state") == "ASSIST" and
+                                     r.get("control_applied"))
+                                for r in rows[first_exit + 1:]),
+                            "Assist reapplied after bounded safety exit")
+            verdict.evidence(any(r.get("state") == "ASSIST_BACKOFF" and
+                                 r.get("W_steps") == 0 and not r.get("control_applied")
+                                 for r in rows[first_exit:]),
+                             "no safe backoff with zero Assist weight")
     elif verdict.scenario == "l10":
         verdict.evidence(bool(assist), "no real Assist decision observed")
         verdict.evidence("MODE_NOT_LITE" in reasons or "TARGET_DISABLED" in reasons,
@@ -278,7 +293,7 @@ def diagnostic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("trace", type=Path)
-    parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05", "l10"))
+    parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05-network", "l10"))
     parser.add_argument("--summary", type=Path)
     parser.add_argument(
         "--ack-drop-count", type=int,
@@ -289,6 +304,8 @@ def main() -> int:
         action="store_true",
         help="write a valid BLOCKED evidence record without failing collection",
     )
+    parser.add_argument("--ack-filter-active-during-assist", action="store_true")
+    parser.add_argument("--ack-filter-install-last-seq", type=int)
     args = parser.parse_args()
     verdict = Verdict(args.scenario)
     rows = load(args.trace, verdict)
@@ -297,6 +314,8 @@ def main() -> int:
         verdict.require(args.ack_drop_count >= 0,
                         "ACK-drop count must be non-negative")
         verdict.facts["ack_drop_count"] = args.ack_drop_count
+    verdict.facts["ack_filter_active_during_assist"] = args.ack_filter_active_during_assist
+    verdict.facts["ack_filter_install_last_seq"] = args.ack_filter_install_last_seq
     scenario_checks(rows, verdict, args.ack_drop_count)
     report = {"schema": "p2-lite-evidence-v1", "scenario": verdict.scenario,
               "status": verdict.status, "errors": verdict.errors,

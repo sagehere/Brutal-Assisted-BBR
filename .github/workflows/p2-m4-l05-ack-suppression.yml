@@ -13,6 +13,8 @@ on:
       - "tools/p2/replay/test_check_lite_trace.py"
       - "tools/p2/replay/aggregate_l05_runs.py"
       - "tools/p2/replay/test_aggregate_l05_runs.py"
+      - "tools/p2/replay/compose_l05_evidence.py"
+      - "tools/p2/replay/test_compose_l05_evidence.py"
       - "tools/p2/preflight.sh"
       - "tools/p2/apply-host-patches.sh"
       - "third_party/quiche-0.29.3"
@@ -44,7 +46,7 @@ jobs:
           bash tools/p2/apply-host-patches.sh
 
       - name: Verify fail-closed P2 evidence checkers
-        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_aggregate_l05_runs.py tools/p2/replay/test_verify_g2_evidence.py
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_aggregate_l05_runs.py tools/p2/replay/test_compose_l05_evidence.py tools/p2/replay/test_verify_g2_evidence.py
 
       - name: Build quiche applications
         run: |
@@ -62,6 +64,18 @@ jobs:
           # admission; retain each independent attempt under its own folder.
           BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l05-ack-suppression.sh
+
+      - name: Collect independent no-ACK host deadline and recovery evidence
+        env:
+          BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
+        run: bash tools/p2/netns/run-lite-l05-host.sh
+
+      - name: Compose both L05 subgates on this code revision
+        run: |
+          python3 tools/p2/replay/compose_l05_evidence.py \
+            阶段任务书/p2-l05-artifacts/summary.json \
+            阶段任务书/p2-l05-artifacts/host/summary.json \
+            "$GITHUB_SHA" 阶段任务书/p2-l05-artifacts/l05-summary.json
 
       - name: Upload L05 evidence
         if: always()

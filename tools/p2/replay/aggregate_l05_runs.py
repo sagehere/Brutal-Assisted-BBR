@@ -18,8 +18,8 @@ def aggregate(reports: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     runs = []
     for name, report in reports:
         status = report.get("status")
-        if report.get("scenario") != "l05":
-            errors.append(f"{name}: summary scenario is not l05")
+        if report.get("scenario") != "l05-network":
+            errors.append(f"{name}: summary scenario is not l05-network")
         if status not in {"PASS", "BLOCKED", "FAIL"}:
             errors.append(f"{name}: invalid or missing status {status!r}")
             status = "FAIL"
@@ -41,8 +41,8 @@ def aggregate(reports: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
         status = "BLOCKED"
 
     return {
-        "schema": "p2-lite-evidence-aggregate-v1",
-        "scenario": "l05",
+        "schema": "l05-split-v1",
+        "scenario": "l05-network",
         "status": status,
         "errors": errors,
         "facts": {
@@ -69,6 +69,10 @@ def main() -> int:
         reports.append((path.parent.name, value))
 
     result = aggregate(reports)
+    import os, subprocess
+    result["candidate_commit"] = os.environ.get("GITHUB_SHA") or subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[3],
+        text=True).strip()
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.summary:
         args.summary.write_text(rendered, encoding="utf-8")

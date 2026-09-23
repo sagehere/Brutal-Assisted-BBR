@@ -21,16 +21,15 @@ accepted sender-side 150 Mbps FQ pacing setup and a 200 Mbps Target. Each attemp
 waits for a real Assist budget pre-debit, then installs a router egress drop
 filter for client-to-server UDP packets—the ACK direction during server data
 transfer. QUIC encrypts packet contents, so the filter cannot distinguish ACK
-frames from other client-to-server control packets. The per-run trace checker
-requires the router's actual dropped-packet counter, `ASSIST_TIMEOUT` at or after
-the admitted deadline, a legal `PTO_FIRED`, and successful socket-send progress
-after expiry. One complete PASS makes the aggregate PASS; if all runs are
-BLOCKED, the aggregate stays BLOCKED. A failed or malformed run makes the
-aggregate FAIL. No missing evidence closes L05 or G2.
-
-This tests that the Assist deadline does not wait for an ACK and that ordinary
-host recovery continues after the auxiliary lease expires. It does not change
-the frozen deadline, pacing, congestion window, or recovery rules.
+frames from other client-to-server control packets. The network checker requires a fresh Assist record after filter installation,
+the router's actual dropped-packet counter, and a bounded safety exit into
+zero-weight backoff without renewed Assist. One complete network PASS makes its
+aggregate PASS; all BLOCKED attempts remain BLOCKED, and malformed or failed
+attempts make it FAIL. `run-lite-l05-host.sh` separately executes the frozen
+quiche's no-ACK deadline, send-entry, admission and PTO recovery regressions.
+`l05-summary.json` is PASS only when both subgates PASS on the same commit.
+These are the `l05-split-v1` acceptance criteria; no missing evidence closes
+L05 or G2. Frozen controller parameters are unchanged.
 
 Only the L05 runner opts into a 5 ms Lite telemetry file drain; normal Lite
 and Observe use the existing 250 ms cadence. The collector requires a fresh,

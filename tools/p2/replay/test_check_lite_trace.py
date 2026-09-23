@@ -32,13 +32,17 @@ def row(**updates):
 
 class LiteTraceCheckerTest(unittest.TestCase):
     def run_check(self, records, scenario="generic", allow_blocked=False,
-                  ack_drop_count=None):
+                  ack_drop_count=None, active=False, install_seq=None):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
             trace.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
             command = [sys.executable, str(CHECKER), str(trace), "--scenario", scenario]
             if ack_drop_count is not None:
                 command.extend(["--ack-drop-count", str(ack_drop_count)])
+            if active:
+                command.append("--ack-filter-active-during-assist")
+            if install_seq is not None:
+                command.extend(["--ack-filter-install-last-seq", str(install_seq)])
             if allow_blocked:
                 command.append("--allow-blocked")
             return subprocess.run(command, text=True, capture_output=True)
@@ -129,72 +133,32 @@ class LiteTraceCheckerTest(unittest.TestCase):
                                                 W_steps=0, control_applied=False,
                                                 assist_deadline_remaining_us=None)], "l04").returncode, 0)
 
-    def test_l05_requires_external_router_ack_drop_counter(self):
-        rows = [
-            row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001,
-                assist_deadline_remaining_us=300_000),
-            row(seq=2, t_us=300_001, state="BASELINE", reason="ASSIST_TIMEOUT",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                actual_socket_sent_bytes=2500,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-        ]
-        self.assertNotEqual(self.run_check(rows, "l05", ack_drop_count=0).returncode, 0)
-        result = self.run_check(rows, "l05", ack_drop_count=12)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"status": "PASS"', result.stdout)
-
-    def test_l05_requires_socket_progress_after_assist_timeout(self):
-        rows = [
-            row(seq=1, t_us=1),
-            row(seq=2, t_us=300_001, state="BASELINE", reason="ASSIST_TIMEOUT",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                actual_socket_sent_bytes=1500,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-        ]
-        result = self.run_check(rows, "l05", ack_drop_count=12, allow_blocked=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("no socket-send progress after the Assist deadline expired", result.stdout)
-        self.assertIn('"status": "BLOCKED"', result.stdout)
-
-    def test_l05_timeout_before_admitted_deadline_is_blocked(self):
-        rows = [
-            row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001,
-                assist_deadline_remaining_us=300_000),
-            row(seq=2, t_us=200_000, state="BASELINE", reason="ASSIST_TIMEOUT",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
-                W_steps=0, control_applied=False, budget_debit_bytes=0,
-                actual_socket_sent_bytes=2500,
-                assist_deadline_monotonic_us=None,
-                assist_deadline_remaining_us=None),
-        ]
-        result = self.run_check(rows, "l05", ack_drop_count=12, allow_blocked=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("Assist timeout did not occur at or after an admitted deadline", result.stdout)
-        self.assertIn('"status": "BLOCKED"', result.stdout)
-
-    def test_l05_without_external_drop_count_is_blocked(self):
-        rows = [row(reason="ASSIST_TIMEOUT"), row(seq=2, t_us=10,
-                  reason="PTO_FIRED", state="ASSIST_BACKOFF",
-                  control_applied=False, W_steps=0, budget_debit_bytes=0,
-                  assist_deadline_monotonic_us=None,
-                  assist_deadline_remaining_us=None)]
-        result = self.run_check(rows, "l05", allow_blocked=True)
-        self.assertEqual(result.returncode, 0)
-        self.assertIn('"status": "BLOCKED"', result.stdout)
-        self.assertIn("no router ACK-drop counter evidence", result.stdout)
+    def test_l05_network_requires_actual_drop_during_live_assist_and_safe_exit(self):
+        rows = [row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001),
+                row(seq=2, t_us=20_000, budget_debit_bytes=2400,
+                    assist_deadline_monotonic_us=300_001),
+                row(seq=3, t_us=40_000, state="ASSIST_BACKOFF",
+                    reason="HARD_QUEUE_DELAY", W_steps=0, control_applied=False,
+                    budget_debit_bytes=0, failure_count=1,
+                    backoff_remaining_us=30_000_000,
+                    assist_deadline_monotonic_us=None,
+                    assist_deadline_remaining_us=None)]
+        self.assertEqual(self.run_check(rows, "l05-network", ack_drop_count=12,
+                                        active=True, install_seq=2).returncode, 0)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=0, active=True,
+            install_seq=2, allow_blocked=True).stdout)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12,
+            install_seq=2, allow_blocked=True).stdout)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=3, allow_blocked=True).stdout)
+        rows.append(row(seq=4, t_us=31_000_000,
+                        assist_deadline_monotonic_us=31_300_000))
+        self.assertIn("Assist reapplied", self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=2).stdout)
 
 
 if __name__ == "__main__":
