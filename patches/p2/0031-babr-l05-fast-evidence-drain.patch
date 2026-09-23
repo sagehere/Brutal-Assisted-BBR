@@ -1,0 +1,47 @@
+diff --git a/tokio-quiche/src/http3/driver/mod.rs b/tokio-quiche/src/http3/driver/mod.rs
+index efd3ee900569b8b8966a87747879839904123c95..514c5d91781a0d1941c3ad83d6481913750d87e1 100644
+--- a/tokio-quiche/src/http3/driver/mod.rs
++++ b/tokio-quiche/src/http3/driver/mod.rs
+@@ -383,6 +383,7 @@ pub struct H3Driver<H: DriverHooks> {
+     babr_lite_sink: Option<File>,
+     babr_lite_path: Option<(SocketAddr, SocketAddr)>,
+     babr_lite_next_drain: Option<Instant>,
++    babr_lite_drain_interval: Duration,
+ }
+ 
+ impl<H: DriverHooks> H3Driver<H> {
+@@ -426,6 +427,7 @@ impl<H: DriverHooks> H3Driver<H> {
+                 babr_lite_sink: None,
+                 babr_lite_path: None,
+                 babr_lite_next_drain: None,
++                babr_lite_drain_interval: BABR_OBSERVE_DRAIN_INTERVAL,
+             },
+             H3Controller {
+                 cmd_sender,
+@@ -1366,8 +1368,16 @@ impl<H: DriverHooks> H3Driver<H> {
+         qconn.babr_set_lite_telemetry_enabled(from, to, true)?;
+         self.babr_lite_sink = Some(sink);
+         self.babr_lite_path = Some((from, to));
++        // The L05 collector must see admission before the 300 ms lease ends.
++        // This opt-in changes only experiment telemetry write cadence.
++        self.babr_lite_drain_interval =
++            if std::env::var_os("BABR_P2_L05_FAST_TELEMETRY").is_some() {
++                Duration::from_millis(5)
++            } else {
++                BABR_OBSERVE_DRAIN_INTERVAL
++            };
+         self.babr_lite_next_drain =
+-            Some(Instant::now() + BABR_OBSERVE_DRAIN_INTERVAL);
++            Some(Instant::now() + self.babr_lite_drain_interval);
+         Ok(())
+     }
+ 
+@@ -1386,7 +1396,7 @@ impl<H: DriverHooks> H3Driver<H> {
+                 }
+             }
+             self.babr_lite_next_drain =
+-                Some(now + BABR_OBSERVE_DRAIN_INTERVAL);
++                Some(now + self.babr_lite_drain_interval);
+         }
+ 
+         let lines = qconn.babr_take_lite_telemetry_json_lines(from, to)?;

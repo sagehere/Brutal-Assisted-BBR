@@ -31,3 +31,10 @@ aggregate FAIL. No missing evidence closes L05 or G2.
 This tests that the Assist deadline does not wait for an ACK and that ordinary
 host recovery continues after the auxiliary lease expires. It does not change
 the frozen deadline, pacing, congestion window, or recovery rules.
+
+Only the L05 runner opts into a 5 ms Lite telemetry file drain; normal Lite
+and Observe use the existing 250 ms cadence. The collector requires a fresh,
+currently active Assist authorization with a real budget pre-debit before it
+installs the filter. It records filter installation's monotonic timestamps and
+retains all independent attempts, including BLOCKED traces. This affects
+experiment observability only; frozen controller and pacing rules are unchanged.

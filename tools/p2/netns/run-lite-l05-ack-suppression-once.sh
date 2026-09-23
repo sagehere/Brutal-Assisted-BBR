@@ -31,7 +31,7 @@ shutil.rmtree(output, ignore_errors=True)
 output.mkdir(parents=True)
 (output / "response").mkdir()
 PY
-printf 'scenario=l05-ack-suppression\ntarget_Bps=%s\nflow_bytes=%s\nrequests=%s\nfq_maxrate_mbit=%s\n' \
+printf 'scenario=l05-ack-suppression\ntarget_Bps=%s\nflow_bytes=%s\nrequests=%s\nfq_maxrate_mbit=%s\ntelemetry_drain_ms=5\n' \
   "$TARGET_BPS" "$FLOW_BYTES" "$REQUESTS" "$PACE_MBIT" > "$OUT/config.txt"
 
 CLIENT_PID=""
@@ -60,6 +60,7 @@ ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-
 ip netns exec "$NS_D" env \
   BABR_P2_MODE=lite \
   BABR_P2_TARGET_BPS="$TARGET_BPS" \
+  BABR_P2_L05_FAST_TELEMETRY=1 \
   BABR_P2_LITE_TELEMETRY_FILE="$OUT/lite.jsonl" \
   "$SERVER_BIN" --address "$D_IP:$PORT" --cc-algorithm bbr2 --enable-pacing \
   > "$OUT/server.log" 2>&1 &
@@ -82,15 +83,30 @@ ACK_FILTER_ARMED=0
 assist_admission_seen() {
   python3 - "$OUT/lite.jsonl" <<'PY'
 import json
+import os
 import sys
+import time
 
 path = sys.argv[1]
-for line in reversed(open(path, encoding="utf-8").read().splitlines()):
+# A past admission is not a live authorization. The experiment-only sink
+# normally drains every 5 ms, so a file idle for 50 ms is too stale to arm.
+if time.time_ns() - os.stat(path).st_mtime_ns > 50_000_000:
+    raise SystemExit(2)
+rows = []
+for line in open(path, encoding="utf-8"):
     try:
-        row = json.loads(line)
+        rows.append(json.loads(line))
     except json.JSONDecodeError:
         continue
-    if (row.get("state") == "ASSIST" and row.get("control_applied") is True
+if not rows or rows[-1].get("state") != "ASSIST":
+    raise SystemExit(2)
+deadline = rows[-1].get("assist_deadline_monotonic_us")
+if not isinstance(deadline, (int, float)) or deadline <= rows[-1].get("t_us", 0):
+    raise SystemExit(2)
+for row in reversed(rows):
+    if row.get("assist_deadline_monotonic_us") != deadline:
+        break
+    if (row.get("control_applied") is True
             and isinstance(row.get("budget_debit_bytes"), (int, float))
             and row["budget_debit_bytes"] > 0):
         raise SystemExit(0)
@@ -112,12 +128,23 @@ for _ in $(seq 1 900); do
 done
 
 if [[ "$ACK_FILTER_ARMED" == 1 ]]; then
+  python3 - "$OUT/ack-suppression-status.txt" <<'PY'
+import sys
+import time
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    output.write(f"ack_filter_install_start_monotonic_ns={time.monotonic_ns()}\n")
+PY
   ip netns exec "$NS_R" tc qdisc replace dev "$R_D_IF" clsact
   ip netns exec "$NS_R" tc filter replace dev "$R_D_IF" egress protocol ip pref 100 \
     flower ip_proto udp src_ip "$S_IP" dst_ip "$D_IP" action drop
   ip netns exec "$NS_R" tc -s filter show dev "$R_D_IF" egress \
     > "$OUT/ack-drop-filter-before.txt"
-  printf 'ack_filter_armed=1\n' > "$OUT/ack-suppression-status.txt"
+  python3 - "$OUT/ack-suppression-status.txt" <<'PY'
+import sys
+import time
+with open(sys.argv[1], "a", encoding="utf-8") as output:
+    output.write(f"ack_filter_armed=1\nack_filter_install_end_monotonic_ns={time.monotonic_ns()}\n")
+PY
 else
   printf 'ack_filter_armed=0\nreason=no real Assist admission with budget pre-debit\n' \
     > "$OUT/ack-suppression-status.txt"
