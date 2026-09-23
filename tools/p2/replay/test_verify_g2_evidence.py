@@ -23,6 +23,9 @@ class G2EvidenceTest(unittest.TestCase):
             name: {"status": "PASS", "commit": commit, "artifact": f"artifact/{name}"}
             for name in NAMES
         }}
+        manifest["evidence"]["l05"].update({"method": "l05-split-v1", "subgates": {
+            name: {"status": "PASS", "commit": commit, "artifact": f"artifact/l05/{name}"}
+            for name in ("network", "host")}})
         self.assertEqual(self.run_check(manifest).returncode, 0)
 
     def test_rejects_mixed_commit_and_blocked_case(self):

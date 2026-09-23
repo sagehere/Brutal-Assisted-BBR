@@ -39,6 +39,20 @@ def main() -> int:
         artifact = item.get("artifact")
         if not isinstance(artifact, str) or not artifact:
             failures.append(f"{name}: artifact reference is required")
+    l05 = evidence.get("l05")
+    if isinstance(l05, dict):
+        if l05.get("method") != "l05-split-v1":
+            failures.append("l05: split acceptance method is required")
+        parts = l05.get("subgates")
+        for name in ("network", "host"):
+            part = parts.get(name) if isinstance(parts, dict) else None
+            if not isinstance(part, dict) or part.get("status") != "PASS":
+                failures.append(f"l05.{name}: PASS evidence is required")
+                continue
+            if part.get("commit") != candidate:
+                failures.append(f"l05.{name}: commit does not match candidate")
+            if not isinstance(part.get("artifact"), str) or not part["artifact"]:
+                failures.append(f"l05.{name}: artifact reference is required")
     report = {
         "schema": "p2-g2-evidence-v1",
         "candidate_commit": candidate,

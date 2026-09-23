@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,8 @@ REQUIRED = {
     "path_id", "phase", "state", "reason", "W_steps",
     "rounds", "target_Bps", "B_ref_Bps", "budget_bytes",
     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
-    "control_applied", "actual_socket_sent_bytes", "dropped_records",
+    "control_applied", "actual_socket_sent_bytes", "model_delivery_Bps",
+    "dropped_records",
     "inflight_bytes", "srtt_us", "min_rtt_us", "sample_valid",
     "sample_age_rounds", "assist_deadline_monotonic_us",
     "assist_deadline_remaining_us", "backoff_remaining_us",
@@ -101,7 +103,7 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.require(row["reason"] in REASONS, f"record {index}: unknown reason {row['reason']!r}")
         verdict.require(isinstance(row["phase"], str) and isinstance(row["state"], str),
                         f"record {index}: phase and state must be strings")
-        for key in ("seq", "t_us", "connection_tag", "path_id", "W_steps", "rounds", "target_Bps", "budget_bytes",
+        for key in ("seq", "t_us", "connection_tag", "path_id", "W_steps", "rounds", "target_Bps", "model_delivery_Bps", "budget_bytes",
                     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
                     "dropped_records", "inflight_bytes", "srtt_us", "sample_age_rounds"):
             verdict.require(numeric(row[key]) and row[key] >= 0,
@@ -144,13 +146,15 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
                             f"record {index}: backoff is not backed by a live failure deadline")
 
 
-def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
+def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
+                    ack_drop_count: int | None = None) -> None:
     phases = {str(row.get("phase")) for row in rows}
     reasons = {str(row.get("reason")) for row in rows}
     assist = [row for row in rows if row.get("state") == "ASSIST" and row.get("control_applied")]
     admitted = [row for row in assist if numeric(row.get("budget_debit_bytes")) and row["budget_debit_bytes"] > 0]
     socket = [row for row in rows if numeric(row.get("actual_socket_sent_bytes")) and row["actual_socket_sent_bytes"] > 0]
     socket_after_admission = False
+    socket_after_timeout = False
     admission_indices = [index for index, row in enumerate(rows)
                          if row.get("state") == "ASSIST" and
                          row.get("control_applied") and
@@ -163,10 +167,28 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         after = [row.get("actual_socket_sent_bytes") for row in rows[first_admission + 1:]
                  if numeric(row.get("actual_socket_sent_bytes"))]
         socket_after_admission = bool(after) and max(after) > max(before, default=0)
+    timeout_indices = [index for index, row in enumerate(rows)
+                       if row.get("reason") == "ASSIST_TIMEOUT"]
+    admitted_deadlines = [row.get("assist_deadline_monotonic_us") for row in admitted
+                         if numeric(row.get("assist_deadline_monotonic_us"))]
+    timeout_after_assist_deadline = any(
+        numeric(rows[index].get("t_us")) and
+        any(deadline <= rows[index]["t_us"] for deadline in admitted_deadlines)
+        for index in timeout_indices
+    )
+    if timeout_indices:
+        first_timeout = timeout_indices[0]
+        timeout_bytes = rows[first_timeout].get("actual_socket_sent_bytes")
+        after_timeout = [row.get("actual_socket_sent_bytes") for row in rows[first_timeout + 1:]
+                         if numeric(row.get("actual_socket_sent_bytes"))]
+        socket_after_timeout = numeric(timeout_bytes) and bool(after_timeout) and \
+            max(after_timeout) > timeout_bytes
     verdict.facts.update(records=len(rows), phases=sorted(phases), reasons=sorted(reasons),
                          assist_records=len(assist), admitted_records=len(admitted),
                          socket_evidence_records=len(socket),
-                         socket_progress_after_admission=socket_after_admission)
+                         socket_progress_after_admission=socket_after_admission,
+                         socket_progress_after_timeout=socket_after_timeout,
+                         timeout_after_assist_deadline=timeout_after_assist_deadline)
 
     if verdict.scenario == "l03":
         verdict.evidence(bool(assist), "no real Assist decision observed")
@@ -180,10 +202,38 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
     elif verdict.scenario == "l04":
         verdict.evidence(bool(PROTECTED & phases),
                          "no real protected BBR phase observed")
-    elif verdict.scenario == "l05":
-        verdict.evidence(bool(assist), "no Assist before ACK suppression")
-        verdict.evidence("ASSIST_TIMEOUT" in reasons, "no ACK-independent timeout observed")
-        verdict.evidence("PTO_FIRED" in reasons, "no legal PTO evidence observed")
+    elif verdict.scenario == "l05-network":
+        verdict.evidence(bool(admitted), "no real Assist budget pre-debit")
+        verdict.evidence(ack_drop_count is not None and ack_drop_count > 0,
+                         "no router ACK-drop counter evidence")
+        in_assist_drops = verdict.facts.get("ack_drop_during_assist_count")
+        verdict.evidence(numeric(in_assist_drops) and in_assist_drops > 0,
+                         "no ACK-direction packets confirmed dropped while Assist was live")
+        if numeric(in_assist_drops) and ack_drop_count is not None:
+            verdict.require(in_assist_drops <= ack_drop_count,
+                            "live Assist drop count exceeds final router count")
+        install_seq = verdict.facts.get("ack_filter_install_last_seq")
+        verdict.evidence(bool(verdict.facts.get("ack_filter_active_during_assist")) and
+                         numeric(install_seq) and any(
+                             r.get("seq") == install_seq and r.get("state") == "ASSIST"
+                             and r.get("control_applied") for r in rows),
+                         "ACK drop was not verified during a live admitted Assist")
+        exits = [i for i, r in enumerate(rows)
+                 if r.get("reason") in ASSIST_EXITS and
+                 r.get("state") == "ASSIST_BACKOFF" and
+                 numeric(install_seq) and numeric(r.get("seq")) and
+                 r["seq"] > install_seq and any(j < i for j in admission_indices)]
+        verdict.evidence(bool(exits), "no bounded safety exit after ACK filter installation")
+        if exits:
+            first_exit = exits[0]
+            verdict.require(all(not (r.get("state") == "ASSIST" and
+                                     r.get("control_applied"))
+                                for r in rows[first_exit + 1:]),
+                            "Assist reapplied after bounded safety exit")
+            verdict.evidence(any(r.get("state") == "ASSIST_BACKOFF" and
+                                 r.get("W_steps") == 0 and not r.get("control_applied")
+                                 for r in rows[first_exit:]),
+                             "no safe backoff with zero Assist weight")
     elif verdict.scenario == "l10":
         verdict.evidence(bool(assist), "no real Assist decision observed")
         verdict.evidence("MODE_NOT_LITE" in reasons or "TARGET_DISABLED" in reasons,
@@ -194,24 +244,91 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.errors.append(f"unknown scenario {verdict.scenario!r}")
 
 
+def nearest_rank(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(1, math.ceil(percentile * len(ordered))) - 1]
+
+
+def diagnostic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the real decision inputs without changing any gate result."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    phase_reason_counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        reason = str(row.get("reason", "UNKNOWN"))
+        phase = str(row.get("phase", "UNKNOWN"))
+        grouped.setdefault(reason, []).append(row)
+        by_reason = phase_reason_counts.setdefault(phase, {})
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+
+    reason_summary: dict[str, Any] = {}
+    for reason, group in sorted(grouped.items()):
+        delivery_ratios = [
+            row["model_delivery_Bps"] / row["target_Bps"]
+            for row in group
+            if numeric(row.get("model_delivery_Bps"))
+            and numeric(row.get("target_Bps")) and row["target_Bps"] > 0
+        ]
+        queue_delays_ms = [
+            max(0, row["srtt_us"] - row["min_rtt_us"]) / 1000.0
+            for row in group
+            if numeric(row.get("srtt_us")) and numeric(row.get("min_rtt_us"))
+        ]
+        sample_ages = [row["sample_age_rounds"] for row in group
+                       if numeric(row.get("sample_age_rounds"))]
+        inflight = [row["inflight_bytes"] for row in group
+                    if numeric(row.get("inflight_bytes"))]
+        reason_summary[reason] = {
+            "records": len(group),
+            "model_delivery_to_target_ratio_p50": statistics.median(delivery_ratios)
+            if delivery_ratios else None,
+            "model_delivery_to_target_ratio_p95": nearest_rank(delivery_ratios, 0.95),
+            "queue_delay_ms_p50": statistics.median(queue_delays_ms)
+            if queue_delays_ms else None,
+            "queue_delay_ms_p95": nearest_rank(queue_delays_ms, 0.95),
+            "sample_age_rounds_p95": nearest_rank(sample_ages, 0.95),
+            "inflight_bytes_p95": nearest_rank(inflight, 0.95),
+        }
+    return {
+        "phase_reason_counts": phase_reason_counts,
+        "reason_summary": reason_summary,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("trace", type=Path)
-    parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05", "l10"))
+    parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05-network", "l10"))
     parser.add_argument("--summary", type=Path)
+    parser.add_argument(
+        "--ack-drop-count", type=int,
+        help="actual packets dropped by the router ACK suppression filter",
+    )
     parser.add_argument(
         "--allow-blocked",
         action="store_true",
         help="write a valid BLOCKED evidence record without failing collection",
     )
+    parser.add_argument("--ack-filter-active-during-assist", action="store_true")
+    parser.add_argument("--ack-filter-install-last-seq", type=int)
+    parser.add_argument("--ack-drop-during-assist-count", type=int)
     args = parser.parse_args()
     verdict = Verdict(args.scenario)
     rows = load(args.trace, verdict)
     validate_rows(rows, verdict)
-    scenario_checks(rows, verdict)
+    if args.ack_drop_count is not None:
+        verdict.require(args.ack_drop_count >= 0,
+                        "ACK-drop count must be non-negative")
+        verdict.facts["ack_drop_count"] = args.ack_drop_count
+    verdict.facts["ack_filter_active_during_assist"] = args.ack_filter_active_during_assist
+    verdict.facts["ack_filter_install_last_seq"] = args.ack_filter_install_last_seq
+    verdict.facts["ack_drop_during_assist_count"] = args.ack_drop_during_assist_count
+    scenario_checks(rows, verdict, args.ack_drop_count)
     report = {"schema": "p2-lite-evidence-v1", "scenario": verdict.scenario,
               "status": verdict.status, "errors": verdict.errors,
-              "blocked": verdict.blocked, "facts": verdict.facts}
+              "blocked": verdict.blocked, "facts": verdict.facts,
+              "diagnostics": diagnostic_summary(rows)}
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.summary:
         args.summary.write_text(rendered, encoding="utf-8")

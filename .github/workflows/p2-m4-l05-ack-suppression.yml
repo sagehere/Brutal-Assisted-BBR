@@ -1,0 +1,89 @@
+name: P2 M4 L05 ACK Suppression Safety
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    paths:
+      - "patches/p2/**"
+      - "tools/p2/netns/**"
+      - "tools/p2/replay/check_lite_trace.py"
+      - "tools/p2/replay/test_check_lite_trace.py"
+      - "tools/p2/replay/aggregate_l05_runs.py"
+      - "tools/p2/replay/test_aggregate_l05_runs.py"
+      - "tools/p2/replay/compose_l05_evidence.py"
+      - "tools/p2/replay/test_compose_l05_evidence.py"
+      - "tools/p2/preflight.sh"
+      - "tools/p2/apply-host-patches.sh"
+      - "third_party/quiche-0.29.3"
+      - ".github/workflows/p2-m4-l05-ack-suppression.yml"
+  workflow_dispatch:
+
+jobs:
+  l05:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout frozen host
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang pkg-config perl nasm iproute2 iputils-ping iperf3 time
+
+      - name: Apply P2 patches
+        run: |
+          bash tools/p2/preflight.sh
+          bash tools/p2/apply-host-patches.sh
+
+      - name: Verify fail-closed P2 evidence checkers
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_aggregate_l05_runs.py tools/p2/replay/test_compose_l05_evidence.py tools/p2/replay/test_verify_g2_evidence.py
+
+      - name: Build quiche applications
+        run: |
+          cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p tokio-quiche --example async_http3_server --features gcongestion
+          cargo build --manifest-path third_party/quiche-0.29.3/Cargo.toml -p quiche_apps --bin quiche-client
+
+      - name: Collect real L05 ACK suppression evidence
+        env:
+          BABR_P2_TARGET_BPS: "25000000"
+          BABR_P2_FLOW_BYTES: "67108864"
+          BABR_P2_L05_REQUESTS: "16"
+          BABR_P2_L05_PACE_MBIT: "150"
+          BABR_P2_L05_RUNS: "3"
+          # Remove ACK-direction feedback immediately after real Assist
+          # admission; retain each independent attempt under its own folder.
+          BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
+        run: sudo -E bash tools/p2/netns/run-lite-l05-ack-suppression.sh
+
+      - name: Collect independent no-ACK host deadline and recovery evidence
+        env:
+          BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
+        run: |
+          # The namespace collector above ran as root and owns the artifact tree.
+          sudo chown -R "$(id -u):$(id -g)" 阶段任务书/p2-l05-artifacts
+          bash tools/p2/netns/run-lite-l05-host.sh
+
+      - name: Compose both L05 subgates on this code revision
+        run: |
+          python3 tools/p2/replay/compose_l05_evidence.py \
+            阶段任务书/p2-l05-artifacts/summary.json \
+            阶段任务书/p2-l05-artifacts/host/summary.json \
+            "$GITHUB_SHA" 阶段任务书/p2-l05-artifacts/l05-summary.json
+
+      - name: Upload L05 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-l05-${{ github.sha }}
+          path: 阶段任务书/p2-l05-artifacts
+          if-no-files-found: error

@@ -1,0 +1,33 @@
+diff --git a/quiche/src/recovery/gcongestion/babr_lite.rs b/quiche/src/recovery/gcongestion/babr_lite.rs
+index c27366af11d7653cbab5456ab3a3d2870e00bbad..56caaa84f9f25ab872ed2f955c9d38e6ef8860e4 100644
+--- a/quiche/src/recovery/gcongestion/babr_lite.rs
++++ b/quiche/src/recovery/gcongestion/babr_lite.rs
+@@ -1098,6 +1098,28 @@ mod tests {
+         assert_eq!(c.lite_deadline(), None);
+     }
+ 
++    #[test]
++    fn l05_no_ack_deadline_rejects_expired_assist_and_keeps_recovery() {
++        let now = Instant::now();
++        let mut c = controller(BabrMode::Lite);
++        assert!(c.on_round(input(now)).control_applied);
++        assert_eq!(c.admit_generated_datagram(now, 1200), BabrLiteAdmission::Assist);
++
++        // No ACK or round callback between admission and the independent timer.
++        let expiry = now + MAX_ASSIST_DURATION;
++        assert_eq!(c.on_deadline_timer(expiry), Some(BabrReasonCode::AssistTimeout));
++        assert_eq!(c.state, BabrLiteState::AssistBackoff);
++        assert_eq!(c.weight_steps, 0);
++        assert_eq!(c.on_send_entry(expiry), None);
++        assert_eq!(c.admit_generated_datagram(expiry, 1200), BabrLiteAdmission::Baseline);
++
++        let mut pto = input(expiry + Duration::from_millis(1));
++        pto.pto_fired = true;
++        let decision = c.on_round(pto);
++        assert!(!decision.control_applied);
++        assert_eq!(decision.weight_steps, 0);
++    }
++
+     #[test]
+     fn observe_shadow_assist_never_arms_execution_deadline_or_budget() {
+         let now = Instant::now();

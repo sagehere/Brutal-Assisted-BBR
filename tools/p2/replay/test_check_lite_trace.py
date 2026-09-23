@@ -16,6 +16,7 @@ def row(**updates):
         "phase": "ProbeBW.Up",
         "state": "ASSIST", "reason": "BOUNDED_PROBE", "W_steps": 1,
         "rounds": 1, "target_Bps": 25_000_000, "B_ref_Bps": 20_000_000,
+        "model_delivery_Bps": 20_000_000,
         "budget_bytes": 3_000_000, "budget_debit_bytes": 1200,
         "unrevocable_queue_bytes": 1200, "failure_count": 0,
         "control_applied": True, "actual_socket_sent_bytes": 1500,
@@ -30,11 +31,20 @@ def row(**updates):
 
 
 class LiteTraceCheckerTest(unittest.TestCase):
-    def run_check(self, records, scenario="generic", allow_blocked=False):
+    def run_check(self, records, scenario="generic", allow_blocked=False,
+                  ack_drop_count=None, active=False, install_seq=None, live_drops=None):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
             trace.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
             command = [sys.executable, str(CHECKER), str(trace), "--scenario", scenario]
+            if ack_drop_count is not None:
+                command.extend(["--ack-drop-count", str(ack_drop_count)])
+            if active:
+                command.append("--ack-filter-active-during-assist")
+            if install_seq is not None:
+                command.extend(["--ack-filter-install-last-seq", str(install_seq)])
+            if live_drops is not None:
+                command.extend(["--ack-drop-during-assist-count", str(live_drops)])
             if allow_blocked:
                 command.append("--allow-blocked")
             return subprocess.run(command, text=True, capture_output=True)
@@ -95,11 +105,65 @@ class LiteTraceCheckerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('\"status\": \"BLOCKED\"', result.stdout)
 
+    def test_diagnostics_group_real_delivery_queue_and_phase_inputs(self):
+        baseline = row(seq=1, t_us=0, state="BASELINE", reason="TARGET_NEAR",
+                       W_steps=0, rounds=0, control_applied=False,
+                       budget_debit_bytes=0, model_delivery_Bps=20_000_000,
+                       target_Bps=25_000_000, actual_socket_sent_bytes=1000,
+                       assist_deadline_monotonic_us=None,
+                       assist_deadline_remaining_us=None)
+        hard_queue = row(seq=2, t_us=100_000, state="ASSIST_BACKOFF",
+                         reason="HARD_QUEUE_DELAY", W_steps=0,
+                         control_applied=False, budget_debit_bytes=0,
+                         model_delivery_Bps=10_000_000, target_Bps=25_000_000,
+                         srtt_us=30_000, min_rtt_us=10_000,
+                         backoff_remaining_us=1_000_000, failure_count=1,
+                         assist_deadline_monotonic_us=None,
+                         assist_deadline_remaining_us=None)
+        result = self.run_check([baseline, hard_queue], allow_blocked=True)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["diagnostics"]["phase_reason_counts"]["ProbeBW.Up"],
+                         {"HARD_QUEUE_DELAY": 1, "TARGET_NEAR": 1})
+        self.assertEqual(report["diagnostics"]["reason_summary"]["TARGET_NEAR"][
+            "model_delivery_to_target_ratio_p50"], 0.8)
+        self.assertEqual(report["diagnostics"]["reason_summary"]["HARD_QUEUE_DELAY"][
+            "queue_delay_ms_p95"], 20)
+
     def test_real_protected_phase_can_close_l04_network_check(self):
         self.assertEqual(self.run_check([row(phase="Startup", state="BASELINE",
                                                 reason="BBR_PHASE_PROTECTED",
                                                 W_steps=0, control_applied=False,
                                                 assist_deadline_remaining_us=None)], "l04").returncode, 0)
+
+    def test_l05_network_requires_actual_drop_during_live_assist_and_safe_exit(self):
+        rows = [row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001),
+                row(seq=2, t_us=20_000, budget_debit_bytes=2400,
+                    assist_deadline_monotonic_us=300_001),
+                row(seq=3, t_us=40_000, state="ASSIST_BACKOFF",
+                    reason="HARD_QUEUE_DELAY", W_steps=0, control_applied=False,
+                    budget_debit_bytes=0, failure_count=1,
+                    backoff_remaining_us=30_000_000,
+                    assist_deadline_monotonic_us=None,
+                    assist_deadline_remaining_us=None)]
+        self.assertEqual(self.run_check(rows, "l05-network", ack_drop_count=12,
+                                        active=True, install_seq=2, live_drops=2).returncode, 0)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=2, live_drops=0, allow_blocked=True).stdout)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=0, active=True,
+            install_seq=2, allow_blocked=True).stdout)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12,
+            install_seq=2, allow_blocked=True).stdout)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=3, allow_blocked=True).stdout)
+        rows.append(row(seq=4, t_us=31_000_000,
+                        assist_deadline_monotonic_us=31_300_000))
+        self.assertIn("Assist reapplied", self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=2, live_drops=2).stdout)
 
 
 if __name__ == "__main__":
