@@ -16,16 +16,17 @@ Only `PASS` L03 evidence is a prerequisite for G2. A collection run may finish w
 
 ## L05 ACK suppression safety
 
-`run-lite-l05-ack-suppression.sh` uses the accepted sender-side 150 Mbps FQ pacing
-setup with a 200 Mbps Target. It waits for a real Assist budget pre-debit, then
-installs a router egress drop filter for client-to-server UDP packets—the ACK
-direction during server data transfer—immediately after a real Assist budget
-debit. QUIC encrypts packet contents, so the filter cannot distinguish ACK
-frames from other client-to-server control packets. The trace checker requires the
-router's actual dropped-packet counter, `ASSIST_TIMEOUT`, a legal `PTO_FIRED`,
-and successful socket-send progress after deadline expiry. Missing admission,
-deadline-window timing, filter drops, timer/PTO evidence, or post-deadline socket
-progress is retained as `BLOCKED`; it cannot close L05 or G2.
+`run-lite-l05-ack-suppression.sh` runs three independent attempts with the
+accepted sender-side 150 Mbps FQ pacing setup and a 200 Mbps Target. Each attempt
+waits for a real Assist budget pre-debit, then installs a router egress drop
+filter for client-to-server UDP packets—the ACK direction during server data
+transfer. QUIC encrypts packet contents, so the filter cannot distinguish ACK
+frames from other client-to-server control packets. The per-run trace checker
+requires the router's actual dropped-packet counter, `ASSIST_TIMEOUT` at or after
+the admitted deadline, a legal `PTO_FIRED`, and successful socket-send progress
+after expiry. One complete PASS makes the aggregate PASS; if all runs are
+BLOCKED, the aggregate stays BLOCKED. A failed or malformed run makes the
+aggregate FAIL. No missing evidence closes L05 or G2.
 
 This tests that the Assist deadline does not wait for an ACK and that ordinary
 host recovery continues after the auxiliary lease expires. It does not change

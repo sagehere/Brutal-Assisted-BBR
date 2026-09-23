@@ -11,6 +11,8 @@ on:
       - "tools/p2/netns/**"
       - "tools/p2/replay/check_lite_trace.py"
       - "tools/p2/replay/test_check_lite_trace.py"
+      - "tools/p2/replay/aggregate_l05_runs.py"
+      - "tools/p2/replay/test_aggregate_l05_runs.py"
       - "tools/p2/preflight.sh"
       - "tools/p2/apply-host-patches.sh"
       - "third_party/quiche-0.29.3"
@@ -42,7 +44,7 @@ jobs:
           bash tools/p2/apply-host-patches.sh
 
       - name: Verify fail-closed P2 evidence checkers
-        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_verify_g2_evidence.py
+        run: python3 -m unittest tools/p2/replay/test_check_lite_trace.py tools/p2/replay/test_aggregate_l05_runs.py tools/p2/replay/test_verify_g2_evidence.py
 
       - name: Build quiche applications
         run: |
@@ -55,9 +57,10 @@ jobs:
           BABR_P2_FLOW_BYTES: "67108864"
           BABR_P2_L05_REQUESTS: "16"
           BABR_P2_L05_PACE_MBIT: "150"
+          BABR_P2_L05_RUNS: "3"
           # Remove ACK-direction feedback immediately after real Assist
-          # admission, leaving its full frozen lease to expire without ACKs.
-          BABR_P2_L05_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
+          # admission; retain each independent attempt under its own folder.
+          BABR_P2_L05_ARTIFACT_ROOT: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l05-ack-suppression.sh
 
       - name: Upload L05 evidence
