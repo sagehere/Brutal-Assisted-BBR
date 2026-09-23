@@ -166,6 +166,25 @@ class LiteTraceCheckerTest(unittest.TestCase):
         self.assertIn("no socket-send progress after the Assist deadline expired", result.stdout)
         self.assertIn('"status": "BLOCKED"', result.stdout)
 
+    def test_l05_timeout_before_admitted_deadline_is_blocked(self):
+        rows = [
+            row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001,
+                assist_deadline_remaining_us=300_000),
+            row(seq=2, t_us=200_000, state="BASELINE", reason="ASSIST_TIMEOUT",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                actual_socket_sent_bytes=2500,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+        ]
+        result = self.run_check(rows, "l05", ack_drop_count=12, allow_blocked=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Assist timeout did not occur at or after an admitted deadline", result.stdout)
+        self.assertIn('"status": "BLOCKED"', result.stdout)
+
     def test_l05_without_external_drop_count_is_blocked(self):
         rows = [row(reason="ASSIST_TIMEOUT"), row(seq=2, t_us=10,
                   reason="PTO_FIRED", state="ASSIST_BACKOFF",

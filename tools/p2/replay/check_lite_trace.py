@@ -169,6 +169,13 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
         socket_after_admission = bool(after) and max(after) > max(before, default=0)
     timeout_indices = [index for index, row in enumerate(rows)
                        if row.get("reason") == "ASSIST_TIMEOUT"]
+    admitted_deadlines = [row.get("assist_deadline_monotonic_us") for row in admitted
+                         if numeric(row.get("assist_deadline_monotonic_us"))]
+    timeout_after_assist_deadline = any(
+        numeric(rows[index].get("t_us")) and
+        any(deadline <= rows[index]["t_us"] for deadline in admitted_deadlines)
+        for index in timeout_indices
+    )
     if timeout_indices:
         first_timeout = timeout_indices[0]
         timeout_bytes = rows[first_timeout].get("actual_socket_sent_bytes")
@@ -180,7 +187,8 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
                          assist_records=len(assist), admitted_records=len(admitted),
                          socket_evidence_records=len(socket),
                          socket_progress_after_admission=socket_after_admission,
-                         socket_progress_after_timeout=socket_after_timeout)
+                         socket_progress_after_timeout=socket_after_timeout,
+                         timeout_after_assist_deadline=timeout_after_assist_deadline)
 
     if verdict.scenario == "l03":
         verdict.evidence(bool(assist), "no real Assist decision observed")
@@ -197,6 +205,8 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
     elif verdict.scenario == "l05":
         verdict.evidence(bool(assist), "no Assist before ACK suppression")
         verdict.evidence("ASSIST_TIMEOUT" in reasons, "no ACK-independent timeout observed")
+        verdict.evidence(timeout_after_assist_deadline,
+                         "Assist timeout did not occur at or after an admitted deadline")
         verdict.evidence("PTO_FIRED" in reasons, "no legal PTO evidence observed")
         verdict.evidence(bool(socket), "no real socket-send evidence observed")
         verdict.evidence(socket_after_timeout,

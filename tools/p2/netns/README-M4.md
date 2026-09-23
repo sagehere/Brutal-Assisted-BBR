@@ -19,8 +19,8 @@ Only `PASS` L03 evidence is a prerequisite for G2. A collection run may finish w
 `run-lite-l05-ack-suppression.sh` uses the accepted sender-side 150 Mbps FQ pacing
 setup with a 200 Mbps Target. It waits for a real Assist budget pre-debit, then
 installs a router egress drop filter for client-to-server UDP packets—the ACK
-direction during server data transfer—within 10 ms of the frozen Assist
-deadline. QUIC encrypts packet contents, so the filter cannot distinguish ACK
+direction during server data transfer—immediately after a real Assist budget
+debit. QUIC encrypts packet contents, so the filter cannot distinguish ACK
 frames from other client-to-server control packets. The trace checker requires the
 router's actual dropped-packet counter, `ASSIST_TIMEOUT`, a legal `PTO_FIRED`,
 and successful socket-send progress after deadline expiry. Missing admission,

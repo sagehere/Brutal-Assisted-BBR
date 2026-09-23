@@ -55,10 +55,8 @@ jobs:
           BABR_P2_FLOW_BYTES: "67108864"
           BABR_P2_L05_REQUESTS: "16"
           BABR_P2_L05_PACE_MBIT: "150"
-          # ACK filtering arms only after a real Assist debit and within 10 ms
-          # of its deadline, giving the ACK-independent timer precedence over
-          # a typical 40 ms path PTO.
-          BABR_P2_L05_DEADLINE_WINDOW_US: "10000"
+          # Remove ACK-direction feedback immediately after real Assist
+          # admission, leaving its full frozen lease to expire without ACKs.
           BABR_P2_L05_ARTIFACT_DIR: ${{ github.workspace }}/阶段任务书/p2-l05-artifacts
         run: sudo -E bash tools/p2/netns/run-lite-l05-ack-suppression.sh
 

@@ -15,7 +15,6 @@ FLOW_BYTES="${BABR_P2_FLOW_BYTES:-67108864}"
 REQUESTS="${BABR_P2_L05_REQUESTS:-16}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 PACE_MBIT="${BABR_P2_L05_PACE_MBIT:-150}"
-ASSIST_DEADLINE_WINDOW_US="${BABR_P2_L05_DEADLINE_WINDOW_US:-50000}"
 OUT="${BABR_P2_L05_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l05-artifacts}"
 
 python3 - "$P2_ROOT" "$OUT" <<'PY'
@@ -32,9 +31,8 @@ shutil.rmtree(output, ignore_errors=True)
 output.mkdir(parents=True)
 (output / "response").mkdir()
 PY
-printf 'scenario=l05-ack-suppression\ntarget_Bps=%s\nflow_bytes=%s\nrequests=%s\nfq_maxrate_mbit=%s\nassist_deadline_window_us=%s\n' \
-  "$TARGET_BPS" "$FLOW_BYTES" "$REQUESTS" "$PACE_MBIT" \
-  "$ASSIST_DEADLINE_WINDOW_US" > "$OUT/config.txt"
+printf 'scenario=l05-ack-suppression\ntarget_Bps=%s\nflow_bytes=%s\nrequests=%s\nfq_maxrate_mbit=%s\n' \
+  "$TARGET_BPS" "$FLOW_BYTES" "$REQUESTS" "$PACE_MBIT" > "$OUT/config.txt"
 
 CLIENT_PID=""
 cleanup() {
@@ -78,16 +76,15 @@ ip netns exec "$NS_S" "$CLIENT_BIN" "${CLIENT_URLS[@]}" \
   > "$OUT/client.log" 2>&1 &
 CLIENT_PID=$!
 
-ADMISSION_SEEN=0
 ACK_FILTER_ARMED=0
-# Wait for a real pre-debit Assist record, then install the router drop rule
-# near its frozen deadline. Missing admission is retained as BLOCKED evidence.
-assist_window_state() {
-  python3 - "$OUT/lite.jsonl" "$ASSIST_DEADLINE_WINDOW_US" <<'PY'
+# Wait for a real pre-debit Assist record, then cut its ACK path immediately so
+# the full frozen lease runs without feedback. Missing admission stays BLOCKED.
+assist_admission_seen() {
+  python3 - "$OUT/lite.jsonl" <<'PY'
 import json
 import sys
 
-path, window = sys.argv[1], int(sys.argv[2])
+path = sys.argv[1]
 for line in reversed(open(path, encoding="utf-8").read().splitlines()):
     try:
         row = json.loads(line)
@@ -96,25 +93,16 @@ for line in reversed(open(path, encoding="utf-8").read().splitlines()):
     if (row.get("state") == "ASSIST" and row.get("control_applied") is True
             and isinstance(row.get("budget_debit_bytes"), (int, float))
             and row["budget_debit_bytes"] > 0):
-        remaining = row.get("assist_deadline_remaining_us")
-        if isinstance(remaining, (int, float)) and 0 < remaining <= window:
-            raise SystemExit(0)
-        raise SystemExit(1)
+        raise SystemExit(0)
 raise SystemExit(2)
 PY
 }
 
 for _ in $(seq 1 900); do
   if [[ -s "$OUT/lite.jsonl" ]]; then
-    if assist_window_state; then
-      ADMISSION_SEEN=1
+    if assist_admission_seen; then
       ACK_FILTER_ARMED=1
       break
-    else
-      check_status=$?
-      if [[ "$check_status" -eq 1 ]]; then
-        ADMISSION_SEEN=1
-      fi
     fi
   fi
   if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
@@ -131,12 +119,7 @@ if [[ "$ACK_FILTER_ARMED" == 1 ]]; then
     > "$OUT/ack-drop-filter-before.txt"
   printf 'ack_filter_armed=1\n' > "$OUT/ack-suppression-status.txt"
 else
-  if [[ "$ADMISSION_SEEN" == 1 ]]; then
-    reason='Assist deadline window was not observed before collection ended'
-  else
-    reason='no real Assist admission with budget pre-debit'
-  fi
-  printf 'ack_filter_armed=0\nreason=%s\n' "$reason" \
+  printf 'ack_filter_armed=0\nreason=no real Assist admission with budget pre-debit\n' \
     > "$OUT/ack-suppression-status.txt"
 fi
 
