@@ -40,3 +40,9 @@ only the drop action is installed after admission. The collector polls at 5 ms
 and records admission detection and filter installation monotonic timestamps and
 retains all independent attempts, including BLOCKED traces. This affects
 experiment observability only; frozen controller and pacing rules are unchanged.
+
+If `tc` activation from the parent still takes longer than a live Assist
+window, the runner starts an ACK-path helper in the router namespace before
+the connection begins. That helper waits on a pipe and creates no drop rule
+until a real admission wakes it. The installed rule's actual dropped count
+and the time spent signalling and waiting remain part of the evidence.

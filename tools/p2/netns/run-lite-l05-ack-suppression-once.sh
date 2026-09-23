@@ -35,10 +35,15 @@ printf 'scenario=l05-ack-suppression\ntarget_Bps=%s\nflow_bytes=%s\nrequests=%s\
   "$TARGET_BPS" "$FLOW_BYTES" "$REQUESTS" "$PACE_MBIT" > "$OUT/config.txt"
 
 CLIENT_PID=""
+ACK_HELPER_PID=""
 cleanup() {
   if [[ -n "$CLIENT_PID" ]] && kill -0 "$CLIENT_PID" 2>/dev/null; then
     kill -TERM "$CLIENT_PID" 2>/dev/null || true
     wait "$CLIENT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "$ACK_HELPER_PID" ]] && kill -0 "$ACK_HELPER_PID" 2>/dev/null; then
+    kill -TERM "$ACK_HELPER_PID" 2>/dev/null || true
+    wait "$ACK_HELPER_PID" 2>/dev/null || true
   fi
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
   "$HERE/cleanup.sh" >/dev/null 2>&1 || true
@@ -56,6 +61,17 @@ ip netns exec "$NS_R" tc qdisc replace dev "$R_S_IF" root netem delay 20ms
 # Install only the empty ACK-path classifier hook before the connection starts.
 # The drop filter itself is installed only after real Assist admission.
 ip netns exec "$NS_R" tc qdisc replace dev "$R_D_IF" clsact
+# Warm the namespace entry and shell before any Assist decision. Until the
+# parent writes "arm", no drop filter exists and ordinary ACKs pass through.
+coproc ACK_DROP_HELPER {
+  ip netns exec "$NS_R" bash -c '
+    IFS= read -r token || exit 1
+    [[ "$token" == arm ]] || exit 1
+    tc filter replace dev "$1" egress protocol ip pref 100 \
+      flower ip_proto udp src_ip "$2" dst_ip "$3" action drop
+  ' _ "$R_D_IF" "$S_IP" "$D_IP" > "$OUT/ack-filter-install.log" 2>&1
+}
+ACK_HELPER_PID="$ACK_DROP_HELPER_PID"
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-before.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-before.txt"
 : > "$OUT/lite.jsonl"
@@ -143,8 +159,9 @@ import time
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     output.write(f"ack_filter_install_start_monotonic_ns={time.monotonic_ns()}\n")
 PY
-  ip netns exec "$NS_R" tc filter replace dev "$R_D_IF" egress protocol ip pref 100 \
-    flower ip_proto udp src_ip "$S_IP" dst_ip "$D_IP" action drop
+  printf 'arm\n' >&"${ACK_DROP_HELPER[1]}"
+  wait "$ACK_HELPER_PID"
+  ACK_HELPER_PID=""
   ip netns exec "$NS_R" tc -s filter show dev "$R_D_IF" egress \
     > "$OUT/ack-drop-filter-before.txt"
   python3 - "$OUT/ack-suppression-status.txt" <<'PY'
