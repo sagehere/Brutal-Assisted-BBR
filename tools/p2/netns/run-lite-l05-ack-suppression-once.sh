@@ -204,23 +204,14 @@ PYEND
   if grep -qx 'ack_filter_active_during_assist=1' "$OUT/ack-suppression-status.txt"; then
     ip netns exec "$NS_R" tc -s filter show dev "$R_D_IF" egress \
       > "$OUT/ack-drop-filter-live-assist.txt"
-    python3 - "$OUT/lite.jsonl" "$OUT/ack-drop-filter-live-assist.txt" \
-      "$OUT/ack-suppression-status.txt" <<'PY'
-import json
-import os
-import re
-import sys
-import time
-
-trace, counter, status = sys.argv[1:]
-drop_match = re.search(r"\(dropped\s+(\d+),", open(counter, encoding="utf-8").read())
-drops = int(drop_match.group(1)) if drop_match else 0
-latest = json.loads(open(trace, encoding="utf-8").read().splitlines()[-1])
-fresh = time.time_ns() - os.stat(trace).st_mtime_ns < 20_000_000
-live = latest.get("state") == "ASSIST" and latest.get("control_applied") is True
-with open(status, "a", encoding="utf-8") as output:
-    output.write(f"ack_drop_during_assist_count={drops if live and fresh else 0}\n")
-PY
+    # A cumulative counter observed once during Assist can include drops from
+    # an earlier inactive interval. Only a positive delta bracketed by fresh
+    # records from this authorization counts as live Assist evidence.
+    python3 "$P2_ROOT/tools/p2/replay/l05_live_drop.py" \
+      "$OUT/lite.jsonl" "$OUT/ack-suppression-status.txt" \
+      "$NS_R" "$R_D_IF" \
+      "$(sed -n 's/^admission_deadline_t_us=//p' "$OUT/ack-admission-observed.txt")" \
+      "$(sed -n 's/^ack_filter_install_last_seq=//p' "$OUT/ack-suppression-status.txt")"
   fi
 else
   printf 'ack_filter_armed=0\nreason=no real Assist admission with budget pre-debit\n' \
