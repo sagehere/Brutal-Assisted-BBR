@@ -16,6 +16,8 @@ REQUESTS="${BABR_P2_L03_REQUESTS:-4}"
 TARGET_BPS="${BABR_P2_TARGET_BPS:-25000000}"
 POLICER_MBIT="${BABR_P2_POLICER_MBIT:-150}"
 INITIAL_SHAPER_MBIT="${BABR_P2_L03_INITIAL_SHAPER_MBIT:-180}"
+PRE_SHAPER_KIND="${BABR_P2_L03_PRE_SHAPER_KIND:-tbf}"
+NETEM_LIMIT_PACKETS="${BABR_P2_L03_NETEM_LIMIT_PACKETS:-100}"
 TBF_BURST_KB="${BABR_P2_L03_TBF_BURST_KB:-64}"
 TBF_LATENCY_MS="${BABR_P2_L03_TBF_LATENCY_MS:-5}"
 EXPERIMENT_VERSION="${BABR_P2_L03_EXPERIMENT_VERSION:-l03-policer-v2-low-queue}"
@@ -24,7 +26,7 @@ OUT="${BABR_P2_L03_ARTIFACT_DIR:-$P2_ROOT/阶段任务书/p2-l03-artifacts}"
 rm -rf "$OUT"
 mkdir -p "$OUT/response"
 
-echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s initial_shaper=${INITIAL_SHAPER_MBIT}mbit policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
+echo "L03 config: version=${EXPERIMENT_VERSION} target=${TARGET_BPS} byte/s pre_shaper=${PRE_SHAPER_KIND}:${INITIAL_SHAPER_MBIT}mbit netem_limit=${NETEM_LIMIT_PACKETS}packets policer=${POLICER_MBIT}mbit tbf_burst=${TBF_BURST_KB}kb tbf_latency=${TBF_LATENCY_MS}ms streams=${REQUESTS} bytes_per_stream=${FLOW_BYTES}" > "$OUT/config.txt"
 
 cleanup() {
   pkill -TERM -f "$SERVER_BIN" 2>/dev/null || true
@@ -43,11 +45,28 @@ bash "$HERE/setup.sh" >/dev/null
 BABR_RATE_MBIT="$INITIAL_SHAPER_MBIT" \
   BABR_TBF_BURST_KB="$TBF_BURST_KB" \
 BABR_TBF_LATENCY_MS="$TBF_LATENCY_MS" \
-  BABR_DATA_DIRECTION=receiver_to_sender \
+BABR_DATA_DIRECTION=receiver_to_sender \
   bash "$HERE/shape.sh" >/dev/null
 
+case "$PRE_SHAPER_KIND" in
+  tbf)
+    ;;
+  netem-rate)
+    # Replace the pre-admission TBF token bucket with a packet-rate shaper.
+    # Keep its queue bounded to about 8 ms at 150 Mbps (100 MTU packets),
+    # below the frozen 20 ms hard queue guard. The experiment verifies actual
+    # drops and RTT rather than assuming this queue cannot overflow.
+    ip netns exec "$NS_R" tc qdisc replace dev "$R_S_IF" root netem \
+      rate "${INITIAL_SHAPER_MBIT}mbit" limit "$NETEM_LIMIT_PACKETS"
+    ;;
+  *)
+    echo "Unsupported L03 pre-admission shaper: $PRE_SHAPER_KIND" >&2
+    exit 94
+    ;;
+esac
+
 # Retain qdisc counters so any pre-admission loss can be attributed to the
-# initial non-policing TBF/netem setup instead of inferred from Lite reasons.
+# router rate qdisc or server netem instead of inferred from Lite reasons.
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/initial-router-data-qdisc-before.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/server-data-qdisc-before.txt"
 echo "Initial router data qdisc before transfer ($R_S_IF):"
