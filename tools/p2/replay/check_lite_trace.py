@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import statistics
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,8 @@ REQUIRED = {
     "path_id", "phase", "state", "reason", "W_steps",
     "rounds", "target_Bps", "B_ref_Bps", "budget_bytes",
     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
-    "control_applied", "actual_socket_sent_bytes", "dropped_records",
+    "control_applied", "actual_socket_sent_bytes", "model_delivery_Bps",
+    "dropped_records",
     "inflight_bytes", "srtt_us", "min_rtt_us", "sample_valid",
     "sample_age_rounds", "assist_deadline_monotonic_us",
     "assist_deadline_remaining_us", "backoff_remaining_us",
@@ -101,7 +103,7 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.require(row["reason"] in REASONS, f"record {index}: unknown reason {row['reason']!r}")
         verdict.require(isinstance(row["phase"], str) and isinstance(row["state"], str),
                         f"record {index}: phase and state must be strings")
-        for key in ("seq", "t_us", "connection_tag", "path_id", "W_steps", "rounds", "target_Bps", "budget_bytes",
+        for key in ("seq", "t_us", "connection_tag", "path_id", "W_steps", "rounds", "target_Bps", "model_delivery_Bps", "budget_bytes",
                     "budget_debit_bytes", "unrevocable_queue_bytes", "failure_count",
                     "dropped_records", "inflight_bytes", "srtt_us", "sample_age_rounds"):
             verdict.require(numeric(row[key]) and row[key] >= 0,
@@ -194,6 +196,58 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.errors.append(f"unknown scenario {verdict.scenario!r}")
 
 
+def nearest_rank(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(1, math.ceil(percentile * len(ordered))) - 1]
+
+
+def diagnostic_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the real decision inputs without changing any gate result."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    phase_reason_counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        reason = str(row.get("reason", "UNKNOWN"))
+        phase = str(row.get("phase", "UNKNOWN"))
+        grouped.setdefault(reason, []).append(row)
+        by_reason = phase_reason_counts.setdefault(phase, {})
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+
+    reason_summary: dict[str, Any] = {}
+    for reason, group in sorted(grouped.items()):
+        delivery_ratios = [
+            row["model_delivery_Bps"] / row["target_Bps"]
+            for row in group
+            if numeric(row.get("model_delivery_Bps"))
+            and numeric(row.get("target_Bps")) and row["target_Bps"] > 0
+        ]
+        queue_delays_ms = [
+            max(0, row["srtt_us"] - row["min_rtt_us"]) / 1000.0
+            for row in group
+            if numeric(row.get("srtt_us")) and numeric(row.get("min_rtt_us"))
+        ]
+        sample_ages = [row["sample_age_rounds"] for row in group
+                       if numeric(row.get("sample_age_rounds"))]
+        inflight = [row["inflight_bytes"] for row in group
+                    if numeric(row.get("inflight_bytes"))]
+        reason_summary[reason] = {
+            "records": len(group),
+            "model_delivery_to_target_ratio_p50": statistics.median(delivery_ratios)
+            if delivery_ratios else None,
+            "model_delivery_to_target_ratio_p95": nearest_rank(delivery_ratios, 0.95),
+            "queue_delay_ms_p50": statistics.median(queue_delays_ms)
+            if queue_delays_ms else None,
+            "queue_delay_ms_p95": nearest_rank(queue_delays_ms, 0.95),
+            "sample_age_rounds_p95": nearest_rank(sample_ages, 0.95),
+            "inflight_bytes_p95": nearest_rank(inflight, 0.95),
+        }
+    return {
+        "phase_reason_counts": phase_reason_counts,
+        "reason_summary": reason_summary,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("trace", type=Path)
@@ -211,7 +265,8 @@ def main() -> int:
     scenario_checks(rows, verdict)
     report = {"schema": "p2-lite-evidence-v1", "scenario": verdict.scenario,
               "status": verdict.status, "errors": verdict.errors,
-              "blocked": verdict.blocked, "facts": verdict.facts}
+              "blocked": verdict.blocked, "facts": verdict.facts,
+              "diagnostics": diagnostic_summary(rows)}
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.summary:
         args.summary.write_text(rendered, encoding="utf-8")

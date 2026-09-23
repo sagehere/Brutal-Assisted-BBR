@@ -16,6 +16,7 @@ def row(**updates):
         "phase": "ProbeBW.Up",
         "state": "ASSIST", "reason": "BOUNDED_PROBE", "W_steps": 1,
         "rounds": 1, "target_Bps": 25_000_000, "B_ref_Bps": 20_000_000,
+        "model_delivery_Bps": 20_000_000,
         "budget_bytes": 3_000_000, "budget_debit_bytes": 1200,
         "unrevocable_queue_bytes": 1200, "failure_count": 0,
         "control_applied": True, "actual_socket_sent_bytes": 1500,
@@ -94,6 +95,30 @@ class LiteTraceCheckerTest(unittest.TestCase):
         result = self.run_check([row()], "l03", allow_blocked=True)
         self.assertEqual(result.returncode, 0)
         self.assertIn('\"status\": \"BLOCKED\"', result.stdout)
+
+    def test_diagnostics_group_real_delivery_queue_and_phase_inputs(self):
+        baseline = row(seq=1, t_us=0, state="BASELINE", reason="TARGET_NEAR",
+                       W_steps=0, rounds=0, control_applied=False,
+                       budget_debit_bytes=0, model_delivery_Bps=20_000_000,
+                       target_Bps=25_000_000, actual_socket_sent_bytes=1000,
+                       assist_deadline_monotonic_us=None,
+                       assist_deadline_remaining_us=None)
+        hard_queue = row(seq=2, t_us=100_000, state="ASSIST_BACKOFF",
+                         reason="HARD_QUEUE_DELAY", W_steps=0,
+                         control_applied=False, budget_debit_bytes=0,
+                         model_delivery_Bps=10_000_000, target_Bps=25_000_000,
+                         srtt_us=30_000, min_rtt_us=10_000,
+                         backoff_remaining_us=1_000_000, failure_count=1,
+                         assist_deadline_monotonic_us=None,
+                         assist_deadline_remaining_us=None)
+        result = self.run_check([baseline, hard_queue], allow_blocked=True)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["diagnostics"]["phase_reason_counts"]["ProbeBW.Up"],
+                         {"HARD_QUEUE_DELAY": 1, "TARGET_NEAR": 1})
+        self.assertEqual(report["diagnostics"]["reason_summary"]["TARGET_NEAR"][
+            "model_delivery_to_target_ratio_p50"], 0.8)
+        self.assertEqual(report["diagnostics"]["reason_summary"]["HARD_QUEUE_DELAY"][
+            "queue_delay_ms_p95"], 20)
 
     def test_real_protected_phase_can_close_l04_network_check(self):
         self.assertEqual(self.run_check([row(phase="Startup", state="BASELINE",
