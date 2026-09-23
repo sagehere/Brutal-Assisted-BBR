@@ -457,8 +457,10 @@ python3 - "$OUT/pairs" "$PAIR_COUNT" "$CPU_LIMIT_RATIO" "$OUT/cpu-summary.json" 
 import json
 import math
 import os
+import platform
 import statistics
 import sys
+from pathlib import Path
 
 pairs_root, count_s, limit_s, out_path = sys.argv[1:]
 count = int(count_s)
@@ -494,6 +496,10 @@ def nearest_rank_p(values, p):
 
 values = [r["cpu_overhead_ratio"] for r in rows]
 p95 = nearest_rank_p(values, 0.95)
+cpu_model = next((line.split(":", 1)[1].strip()
+                  for line in Path("/proc/cpuinfo").read_text().splitlines()
+                  if line.startswith("model name")), "unknown")
+cpu_max_path = Path("/sys/fs/cgroup/cpu.max")
 summary = {
     "schema": "p2-observe-persistent-cpu-gate-v1",
     "pairs": count,
@@ -507,6 +513,18 @@ summary = {
     "p95_method": "nearest-rank",
     "median_cpu_overhead_ratio": statistics.median(values),
     "p95_cpu_overhead_ratio": p95,
+    "diagnostics": {
+        "cpu_model": cpu_model,
+        "kernel_release": platform.release(),
+        "cgroup_cpu_max": cpu_max_path.read_text().strip()
+        if cpu_max_path.exists() else None,
+        "off_cpu_seconds_min": min(r["off_cpu_seconds"] for r in rows),
+        "off_cpu_seconds_max": max(r["off_cpu_seconds"] for r in rows),
+        "observe_cpu_seconds_min": min(r["observe_cpu_seconds"] for r in rows),
+        "observe_cpu_seconds_max": max(r["observe_cpu_seconds"] for r in rows),
+        "negative_overhead_pairs": sum(v < 0 for v in values),
+        "pairs_over_limit": sum(v > limit for v in values),
+    },
     "limit_ratio": limit,
     "cpu_pass": p95 <= limit,
     "rows": rows,
