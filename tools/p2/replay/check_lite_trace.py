@@ -146,13 +146,15 @@ def validate_rows(rows: list[dict[str, Any]], verdict: Verdict) -> None:
                             f"record {index}: backoff is not backed by a live failure deadline")
 
 
-def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
+def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
+                    ack_drop_count: int | None = None) -> None:
     phases = {str(row.get("phase")) for row in rows}
     reasons = {str(row.get("reason")) for row in rows}
     assist = [row for row in rows if row.get("state") == "ASSIST" and row.get("control_applied")]
     admitted = [row for row in assist if numeric(row.get("budget_debit_bytes")) and row["budget_debit_bytes"] > 0]
     socket = [row for row in rows if numeric(row.get("actual_socket_sent_bytes")) and row["actual_socket_sent_bytes"] > 0]
     socket_after_admission = False
+    socket_after_timeout = False
     admission_indices = [index for index, row in enumerate(rows)
                          if row.get("state") == "ASSIST" and
                          row.get("control_applied") and
@@ -165,10 +167,20 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         after = [row.get("actual_socket_sent_bytes") for row in rows[first_admission + 1:]
                  if numeric(row.get("actual_socket_sent_bytes"))]
         socket_after_admission = bool(after) and max(after) > max(before, default=0)
+    timeout_indices = [index for index, row in enumerate(rows)
+                       if row.get("reason") == "ASSIST_TIMEOUT"]
+    if timeout_indices:
+        first_timeout = timeout_indices[0]
+        timeout_bytes = rows[first_timeout].get("actual_socket_sent_bytes")
+        after_timeout = [row.get("actual_socket_sent_bytes") for row in rows[first_timeout + 1:]
+                         if numeric(row.get("actual_socket_sent_bytes"))]
+        socket_after_timeout = numeric(timeout_bytes) and bool(after_timeout) and \
+            max(after_timeout) > timeout_bytes
     verdict.facts.update(records=len(rows), phases=sorted(phases), reasons=sorted(reasons),
                          assist_records=len(assist), admitted_records=len(admitted),
                          socket_evidence_records=len(socket),
-                         socket_progress_after_admission=socket_after_admission)
+                         socket_progress_after_admission=socket_after_admission,
+                         socket_progress_after_timeout=socket_after_timeout)
 
     if verdict.scenario == "l03":
         verdict.evidence(bool(assist), "no real Assist decision observed")
@@ -186,6 +198,11 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict) -> None:
         verdict.evidence(bool(assist), "no Assist before ACK suppression")
         verdict.evidence("ASSIST_TIMEOUT" in reasons, "no ACK-independent timeout observed")
         verdict.evidence("PTO_FIRED" in reasons, "no legal PTO evidence observed")
+        verdict.evidence(bool(socket), "no real socket-send evidence observed")
+        verdict.evidence(socket_after_timeout,
+                         "no socket-send progress after the Assist deadline expired")
+        verdict.evidence(ack_drop_count is not None and ack_drop_count > 0,
+                         "no router ACK-drop counter evidence")
     elif verdict.scenario == "l10":
         verdict.evidence(bool(assist), "no real Assist decision observed")
         verdict.evidence("MODE_NOT_LITE" in reasons or "TARGET_DISABLED" in reasons,
@@ -254,6 +271,10 @@ def main() -> int:
     parser.add_argument("--scenario", default="generic", choices=("generic", "l03", "l04", "l05", "l10"))
     parser.add_argument("--summary", type=Path)
     parser.add_argument(
+        "--ack-drop-count", type=int,
+        help="actual packets dropped by the router ACK suppression filter",
+    )
+    parser.add_argument(
         "--allow-blocked",
         action="store_true",
         help="write a valid BLOCKED evidence record without failing collection",
@@ -262,7 +283,11 @@ def main() -> int:
     verdict = Verdict(args.scenario)
     rows = load(args.trace, verdict)
     validate_rows(rows, verdict)
-    scenario_checks(rows, verdict)
+    if args.ack_drop_count is not None:
+        verdict.require(args.ack_drop_count >= 0,
+                        "ACK-drop count must be non-negative")
+        verdict.facts["ack_drop_count"] = args.ack_drop_count
+    scenario_checks(rows, verdict, args.ack_drop_count)
     report = {"schema": "p2-lite-evidence-v1", "scenario": verdict.scenario,
               "status": verdict.status, "errors": verdict.errors,
               "blocked": verdict.blocked, "facts": verdict.facts,

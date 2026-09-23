@@ -31,11 +31,14 @@ def row(**updates):
 
 
 class LiteTraceCheckerTest(unittest.TestCase):
-    def run_check(self, records, scenario="generic", allow_blocked=False):
+    def run_check(self, records, scenario="generic", allow_blocked=False,
+                  ack_drop_count=None):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
             trace.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
             command = [sys.executable, str(CHECKER), str(trace), "--scenario", scenario]
+            if ack_drop_count is not None:
+                command.extend(["--ack-drop-count", str(ack_drop_count)])
             if allow_blocked:
                 command.append("--allow-blocked")
             return subprocess.run(command, text=True, capture_output=True)
@@ -125,6 +128,54 @@ class LiteTraceCheckerTest(unittest.TestCase):
                                                 reason="BBR_PHASE_PROTECTED",
                                                 W_steps=0, control_applied=False,
                                                 assist_deadline_remaining_us=None)], "l04").returncode, 0)
+
+    def test_l05_requires_external_router_ack_drop_counter(self):
+        rows = [
+            row(seq=1, t_us=1, assist_deadline_monotonic_us=300_001,
+                assist_deadline_remaining_us=300_000),
+            row(seq=2, t_us=300_001, state="BASELINE", reason="ASSIST_TIMEOUT",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                actual_socket_sent_bytes=2500,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+        ]
+        self.assertNotEqual(self.run_check(rows, "l05", ack_drop_count=0).returncode, 0)
+        result = self.run_check(rows, "l05", ack_drop_count=12)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"status": "PASS"', result.stdout)
+
+    def test_l05_requires_socket_progress_after_assist_timeout(self):
+        rows = [
+            row(seq=1, t_us=1),
+            row(seq=2, t_us=300_001, state="BASELINE", reason="ASSIST_TIMEOUT",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+            row(seq=3, t_us=400_001, state="ASSIST_BACKOFF", reason="PTO_FIRED",
+                W_steps=0, control_applied=False, budget_debit_bytes=0,
+                actual_socket_sent_bytes=1500,
+                assist_deadline_monotonic_us=None,
+                assist_deadline_remaining_us=None),
+        ]
+        result = self.run_check(rows, "l05", ack_drop_count=12, allow_blocked=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("no socket-send progress after the Assist deadline expired", result.stdout)
+        self.assertIn('"status": "BLOCKED"', result.stdout)
+
+    def test_l05_without_external_drop_count_is_blocked(self):
+        rows = [row(reason="ASSIST_TIMEOUT"), row(seq=2, t_us=10,
+                  reason="PTO_FIRED", state="ASSIST_BACKOFF",
+                  control_applied=False, W_steps=0, budget_debit_bytes=0,
+                  assist_deadline_monotonic_us=None,
+                  assist_deadline_remaining_us=None)]
+        result = self.run_check(rows, "l05", allow_blocked=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('"status": "BLOCKED"', result.stdout)
+        self.assertIn("no router ACK-drop counter evidence", result.stdout)
 
 
 if __name__ == "__main__":
