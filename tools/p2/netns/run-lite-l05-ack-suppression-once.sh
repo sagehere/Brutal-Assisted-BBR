@@ -53,6 +53,9 @@ BABR_DATA_DIRECTION=receiver_to_sender bash "$HERE/shape.sh" >/dev/null
 ip netns exec "$NS_D" tc qdisc replace dev "$D_IF" root fq \
   maxrate "${PACE_MBIT}mbit" flow_limit 100 limit 1000
 ip netns exec "$NS_R" tc qdisc replace dev "$R_S_IF" root netem delay 20ms
+# Install only the empty ACK-path classifier hook before the connection starts.
+# The drop filter itself is installed only after real Assist admission.
+ip netns exec "$NS_R" tc qdisc replace dev "$R_D_IF" clsact
 ip netns exec "$NS_R" tc -s -d qdisc show dev "$R_S_IF" > "$OUT/router-data-qdisc-before.txt"
 ip netns exec "$NS_D" tc -s -d qdisc show dev "$D_IF" > "$OUT/sender-data-qdisc-before.txt"
 : > "$OUT/lite.jsonl"
@@ -81,7 +84,7 @@ ACK_FILTER_ARMED=0
 # Wait for a real pre-debit Assist record, then cut its ACK path immediately so
 # the full frozen lease runs without feedback. Missing admission stays BLOCKED.
 assist_admission_seen() {
-  python3 - "$OUT/lite.jsonl" <<'PY'
+  python3 - "$OUT/lite.jsonl" "$OUT/ack-admission-observed.txt" <<'PY'
 import json
 import os
 import sys
@@ -109,12 +112,18 @@ for row in reversed(rows):
     if (row.get("control_applied") is True
             and isinstance(row.get("budget_debit_bytes"), (int, float))
             and row["budget_debit_bytes"] > 0):
+        with open(sys.argv[2], "w", encoding="utf-8") as output:
+            output.write(f"admission_seq={row['seq']}\n")
+            output.write(f"admission_t_us={row['t_us']}\n")
+            output.write(f"admission_deadline_t_us={deadline}\n")
+            output.write(f"last_seen_t_us={rows[-1]['t_us']}\n")
+            output.write(f"admission_detect_monotonic_ns={time.monotonic_ns()}\n")
         raise SystemExit(0)
 raise SystemExit(2)
 PY
 }
 
-for _ in $(seq 1 900); do
+for _ in $(seq 1 3600); do
   if [[ -s "$OUT/lite.jsonl" ]]; then
     if assist_admission_seen; then
       ACK_FILTER_ARMED=1
@@ -124,7 +133,7 @@ for _ in $(seq 1 900); do
   if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
     break
   fi
-  sleep 0.02
+  sleep 0.005
 done
 
 if [[ "$ACK_FILTER_ARMED" == 1 ]]; then
@@ -134,7 +143,6 @@ import time
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     output.write(f"ack_filter_install_start_monotonic_ns={time.monotonic_ns()}\n")
 PY
-  ip netns exec "$NS_R" tc qdisc replace dev "$R_D_IF" clsact
   ip netns exec "$NS_R" tc filter replace dev "$R_D_IF" egress protocol ip pref 100 \
     flower ip_proto udp src_ip "$S_IP" dst_ip "$D_IP" action drop
   ip netns exec "$NS_R" tc -s filter show dev "$R_D_IF" egress \

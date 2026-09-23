@@ -35,6 +35,8 @@ the frozen deadline, pacing, congestion window, or recovery rules.
 Only the L05 runner opts into a 5 ms Lite telemetry file drain; normal Lite
 and Observe use the existing 250 ms cadence. The collector requires a fresh,
 currently active Assist authorization with a real budget pre-debit before it
-installs the filter. It records filter installation's monotonic timestamps and
+installs the filter. An empty `clsact` hook is installed before the transfer;
+only the drop action is installed after admission. The collector polls at 5 ms
+and records admission detection and filter installation monotonic timestamps and
 retains all independent attempts, including BLOCKED traces. This affects
 experiment observability only; frozen controller and pacing rules are unchanged.
