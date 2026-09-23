@@ -206,6 +206,12 @@ def scenario_checks(rows: list[dict[str, Any]], verdict: Verdict,
         verdict.evidence(bool(admitted), "no real Assist budget pre-debit")
         verdict.evidence(ack_drop_count is not None and ack_drop_count > 0,
                          "no router ACK-drop counter evidence")
+        in_assist_drops = verdict.facts.get("ack_drop_during_assist_count")
+        verdict.evidence(numeric(in_assist_drops) and in_assist_drops > 0,
+                         "no ACK-direction packets confirmed dropped while Assist was live")
+        if numeric(in_assist_drops) and ack_drop_count is not None:
+            verdict.require(in_assist_drops <= ack_drop_count,
+                            "live Assist drop count exceeds final router count")
         install_seq = verdict.facts.get("ack_filter_install_last_seq")
         verdict.evidence(bool(verdict.facts.get("ack_filter_active_during_assist")) and
                          numeric(install_seq) and any(
@@ -306,6 +312,7 @@ def main() -> int:
     )
     parser.add_argument("--ack-filter-active-during-assist", action="store_true")
     parser.add_argument("--ack-filter-install-last-seq", type=int)
+    parser.add_argument("--ack-drop-during-assist-count", type=int)
     args = parser.parse_args()
     verdict = Verdict(args.scenario)
     rows = load(args.trace, verdict)
@@ -316,6 +323,7 @@ def main() -> int:
         verdict.facts["ack_drop_count"] = args.ack_drop_count
     verdict.facts["ack_filter_active_during_assist"] = args.ack_filter_active_during_assist
     verdict.facts["ack_filter_install_last_seq"] = args.ack_filter_install_last_seq
+    verdict.facts["ack_drop_during_assist_count"] = args.ack_drop_during_assist_count
     scenario_checks(rows, verdict, args.ack_drop_count)
     report = {"schema": "p2-lite-evidence-v1", "scenario": verdict.scenario,
               "status": verdict.status, "errors": verdict.errors,

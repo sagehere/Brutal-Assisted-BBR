@@ -32,7 +32,7 @@ def row(**updates):
 
 class LiteTraceCheckerTest(unittest.TestCase):
     def run_check(self, records, scenario="generic", allow_blocked=False,
-                  ack_drop_count=None, active=False, install_seq=None):
+                  ack_drop_count=None, active=False, install_seq=None, live_drops=None):
         with tempfile.TemporaryDirectory() as directory:
             trace = Path(directory) / "trace.jsonl"
             trace.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
@@ -43,6 +43,8 @@ class LiteTraceCheckerTest(unittest.TestCase):
                 command.append("--ack-filter-active-during-assist")
             if install_seq is not None:
                 command.extend(["--ack-filter-install-last-seq", str(install_seq)])
+            if live_drops is not None:
+                command.extend(["--ack-drop-during-assist-count", str(live_drops)])
             if allow_blocked:
                 command.append("--allow-blocked")
             return subprocess.run(command, text=True, capture_output=True)
@@ -144,7 +146,10 @@ class LiteTraceCheckerTest(unittest.TestCase):
                     assist_deadline_monotonic_us=None,
                     assist_deadline_remaining_us=None)]
         self.assertEqual(self.run_check(rows, "l05-network", ack_drop_count=12,
-                                        active=True, install_seq=2).returncode, 0)
+                                        active=True, install_seq=2, live_drops=2).returncode, 0)
+        self.assertIn('"status": "BLOCKED"', self.run_check(
+            rows, "l05-network", ack_drop_count=12, active=True,
+            install_seq=2, live_drops=0, allow_blocked=True).stdout)
         self.assertIn('"status": "BLOCKED"', self.run_check(
             rows, "l05-network", ack_drop_count=0, active=True,
             install_seq=2, allow_blocked=True).stdout)
@@ -158,7 +163,7 @@ class LiteTraceCheckerTest(unittest.TestCase):
                         assist_deadline_monotonic_us=31_300_000))
         self.assertIn("Assist reapplied", self.run_check(
             rows, "l05-network", ack_drop_count=12, active=True,
-            install_seq=2).stdout)
+            install_seq=2, live_drops=2).stdout)
 
 
 if __name__ == "__main__":
